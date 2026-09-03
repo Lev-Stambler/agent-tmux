@@ -39,7 +39,10 @@ with a live preview and `ctrl-d` to kill.
 
 ## Requirements
 
-- tmux **3.2+** (uses `display-popup`, `#[fill=]`, `range=user`)
+- tmux **3.2+** (uses `display-popup`, `#[fill=]`, `range=user`). On anything
+  older the plugin refuses to load and says so rather than half-installing —
+  `tmux show-option -gv @agent_tmux_error` has the reason. Verified against
+  3.0a, 3.2a, 3.3a and 3.4.
 - `bash` and `fzf`
 - Optional: `jq`, for exact background-task detection in the Claude hook payload
 
@@ -231,12 +234,19 @@ There is a regression test for exactly this.
 bash tests/tmux-sessions.test.sh    # the rail: numbering, pills, jump, click, button
 bash tests/agent-status.test.sh     # state aggregation, theme restoration, palette
 tests/vhs/run.sh                    # renders real tmux and pixel-samples the colors
+tests/cleanroom.sh                  # fresh containers: does this work for a stranger?
 ```
 
 The first two use a throwaway `tmux -L <socket>` server and never touch your live
 sessions. The VHS suite renders an actual session against a self-contained config
 and asserts the *rendered pixels*, which is the only layer that can catch a
 status-format regression. It needs `vhs`, `ttyd`, `ffmpeg` and ImageMagick.
+
+`cleanroom.sh` installs the plugin in throwaway containers — fresh user, empty
+`$HOME`, nothing present but tmux/git/fzf — across Ubuntu 22.04/24.04 and Debian
+12, plus a no-`fzf` box and one tmux below the supported floor. It needs Docker.
+This is the layer that catches "works on the author's machine": a developer's box
+always has their own dotfiles in it, so it cannot tell you what a stranger sees.
 
 ## Known limits
 

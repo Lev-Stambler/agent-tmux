@@ -8,6 +8,25 @@ set -u
 
 DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
 
+# Version gate. display-popup is tmux 3.2+, and a plugin loaded via `run` has its
+# stderr swallowed — so on an older tmux the status row installs fine while every
+# single key binding silently fails, leaving a half-working plugin and no clue
+# why. Verified on Ubuntu 20.04 (tmux 3.0a). Refuse loudly instead.
+ver="$(tmux -V | sed 's/^tmux //; s/^next-//; s/[^0-9.].*$//')"
+v_maj="${ver%%.*}"; v_min="${ver#*.}"; v_min="${v_min%%.*}"
+case "$v_maj" in ''|*[!0-9]*) v_maj=0 ;; esac
+case "$v_min" in ''|*[!0-9]*) v_min=0 ;; esac
+if [ "$v_maj" -lt 3 ] || { [ "$v_maj" -eq 3 ] && [ "$v_min" -lt 2 ]; }; then
+  msg="agent-tmux: needs tmux 3.2 or newer (found ${ver:-unknown}); not loaded"
+  # Two channels on purpose. display-message only lands if a client is attached,
+  # which is false while tmux.conf is first parsed but TRUE on prefix+I (the TPM
+  # install) and prefix+R — the moments a user is actually looking. The option is
+  # the durable record for anyone asking "why is nothing happening".
+  tmux set-option -g @agent_tmux_error "$msg" 2>/dev/null
+  tmux display-message -d 4000 "$msg" 2>/dev/null
+  exit 0
+fi
+
 opt(){ local v; v="$(tmux show-option -gqv "$1" 2>/dev/null)"; [ -n "$v" ] && printf '%s' "$v" || printf '%s' "$2"; }
 
 ROW="$(opt @agent_tmux_row 1)"
