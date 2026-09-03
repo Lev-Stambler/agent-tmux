@@ -68,5 +68,65 @@ CONF
 
 vhs "$OUT/.demo.tape"
 tmux -L atxdemo kill-server 2>/dev/null || true
-rm -f "$OUT/.demo.conf" "$OUT/.demo.run.sh" "$OUT/.demo.tape" "$OUT/.demo.rc"
 echo "wrote $OUT/sessions.gif"
+
+# ---------------------------------------------------------------- tab colours --
+# Drives the REAL agent-status.sh (the entrypoint the Claude/Codex hooks call)
+# through a turn, so the GIF shows the actual production path rather than a mock.
+colour_gif(){ # <name> <panes> <script-body> <seconds>
+  local name="$1" panes="$2" body="$3" secs="$4"
+  cat > "$OUT/.c.run.sh" <<CONF
+#!/usr/bin/env bash
+S=atxcolour
+SS="$ROOT/tests/vhs/set-state.sh"
+tmux -L \$S kill-server 2>/dev/null
+tmux -L \$S -f "$OUT/.demo.conf" new-session -d -s api -n api -x 100 -y 14 "bash --rcfile $OUT/.demo.rc -i"
+tmux -L \$S rename-window -t api:1 api
+A=\$(tmux -L \$S display-message -p -t api '#{pane_id}')
+$panes
+( $body ) &
+exec tmux -L \$S attach -t api
+CONF
+  chmod +x "$OUT/.c.run.sh"
+  cat > "$OUT/.c.tape" <<CONF
+Output "$OUT/$name.gif"
+Set Shell "bash"
+Set Width 900
+Set Height 170
+Set FontSize 15
+Set Padding 0
+Set Margin 0
+Set Theme "Catppuccin Mocha"
+Set Framerate 12
+Sleep 300ms
+Hide
+Type "bash $OUT/.c.run.sh"
+Enter
+Sleep 2s
+Show
+Sleep ${secs}s
+CONF
+  vhs "$OUT/.c.tape"
+  tmux -L atxcolour kill-server 2>/dev/null || true
+  echo "wrote $OUT/$name.gif"
+}
+
+colour_gif single "" \
+  'sleep 1.5
+   bash $SS $S $A working </dev/null; sleep 2.5
+   bash $SS $S $A waiting </dev/null; sleep 2.5
+   bash $SS $S $A blocked </dev/null; sleep 2.5
+   bash $SS $S $A done    </dev/null; sleep 2.5' 13
+
+colour_gif aggregate \
+  'B=$(tmux -L $S split-window -h -t api -P -F "#{pane_id}" "bash --rcfile '"$OUT"'/.demo.rc -i")' \
+  'sleep 1.5
+   bash $SS $S $A working </dev/null
+   bash $SS $S $B working </dev/null; sleep 2.5
+   bash $SS $S $B waiting </dev/null; sleep 2.5
+   bash $SS $S $A blocked </dev/null; sleep 3
+   bash $SS $S $A working </dev/null
+   bash $SS $S $B working </dev/null; sleep 2.5' 14
+
+[ -n "${KEEP:-}" ] || rm -f "$OUT/.demo.conf" "$OUT/.demo.run.sh" "$OUT/.demo.tape" "$OUT/.demo.rc" \
+      "$OUT/.c.run.sh" "$OUT/.c.tape"
