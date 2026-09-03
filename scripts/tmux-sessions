@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
 # tmux-sessions — renders status row 1 and handles its click/jump routing.
 #
-#   status [current]  the row itself: an optional picker button followed by
-#                     "1:alpha 2:bravo ..." as pills on a solid band. <current>
+#   status [current] [width]
+#                     the row itself. Wide: a picker button followed by
+#                     "1:alpha 2:bravo ..." as pills on a solid band; <current>
 #                     sits on the accent pill, the rest on dim pills. Every
 #                     entry is a clickable #[range=user|session_N]; the button
 #                     is #[range=user|picker].
+#                     If <width> is given and the full rail would not fit in it
+#                     (a phone over SSH is ~40-55 columns), the row collapses to
+#                     a #[range=user|menu] hamburger, an optional attention
+#                     badge, and the current session alone. <width> comes from
+#                     '#{client_width}' in status-format, which tmux expands
+#                     PER CLIENT before running the job -- so a laptop and a
+#                     phone attached to the same session at the same time each
+#                     get the row that fits them. Omitted => never collapse.
+#   menu CLIENT       open the hamburger menu on CLIENT: panes whose agent needs
+#                     you, then every session, then the project picker.
+#   menu-args CLIENT  print the argv `menu` would hand display-menu, one per
+#                     line. A menu is a client-side overlay that capture-pane
+#                     cannot see, so this is how the contents get tested.
 #   jump N [client]   switch <client> (default: current client) to the Nth
 #                     session, numbering sessions alphabetically by name
 #                     (tmux's native list-sessions order — same as prefix+o).
@@ -28,6 +42,11 @@ BAND='#181825'       # mantle   — row background between pills
 BTN_BG='#313244'     # button pill background
 BTN_FG='#cba6f7'     # button glyph
 BTN_LABEL='+'        # button glyph; empty or "off" hides the button
+MENU_LABEL='☰'       # hamburger glyph shown instead of the rail when narrow
+NARROW=''            # force a breakpoint; empty => collapse only when it doesn't fit
+S_BLOCKED='#f38ba8'  # badge colour: a pane is blocked
+S_WAITING='#f9e2af'  # badge colour: a pane finished its turn
+MENU_MAX=12          # hard cap on menu items; 0 = only the client-height cap
 
 load_opts(){
   local opts
@@ -47,6 +66,11 @@ load_opts(){
       @agent_tmux_button_bg)    BTN_BG="$v" ;;
       @agent_tmux_button_fg)    BTN_FG="$v" ;;
       @agent_tmux_button_label) BTN_LABEL="$v" ;;
+      @agent_tmux_menu_label)   MENU_LABEL="$v" ;;
+      @agent_tmux_narrow_width) NARROW="$v" ;;
+      @agent_tmux_state_blocked) S_BLOCKED="$v" ;;
+      @agent_tmux_state_waiting) S_WAITING="$v" ;;
+      @agent_tmux_menu_max)     MENU_MAX="$v" ;;
     esac
   done <<EOF
 $opts
@@ -54,6 +78,20 @@ EOF
 }
 
 sessions(){ tmux list-sessions -F '#{session_name}' 2>/dev/null; }
+
+# Where does a status-bar range go? One implementation, two callers: `route`
+# prints the decision (so tests can assert it without opening a popup that
+# blocks forever waiting for a human), `click` acts on it.
+route_of(){
+  case "${1:-}" in
+    menu)   printf 'menu'   ;;
+    picker) printf 'picker' ;;
+    session_*)
+      n="${1#session_}"
+      case "$n" in ''|*[!0-9]*) printf 'none' ;; *) printf 'jump %s' "$n" ;; esac ;;
+    *) printf 'none' ;;
+  esac
+}
 
 case "${1:-}" in
   jump)
@@ -69,19 +107,24 @@ case "${1:-}" in
     exit 0
     ;;
   status)
-    current="${2:-}"
+    current="${2:-}"; width="${3:-}"
     # Resolve the session list FIRST. If the server is unreachable (e.g. inside a
     # sandbox with a fresh /tmp) print nothing at all — a lone picker button on an
     # otherwise empty row is worse than no row.
     list="$(sessions)" || exit 0
     [ -n "$list" ] || exit 0
     load_opts
-    i=0; out=""
-    # The picker button leads the row so its position never shifts as sessions
-    # come and go — muscle memory beats a button that slides around.
+
+    # Build the full rail, tracking its RENDERED width as we go so we can tell
+    # whether it fits without measuring the styled string (which is full of
+    # #[...] directives that occupy no columns).
+    #   total = leading space + every segment + one space between segments
+    # Widths use the RAW name: '#' is doubled for tmux's benefit but draws as one.
+    i=0; out=""; segw=0; nseg=0; cur_i=0; cur_name=""
     case "$BTN_LABEL" in
       ''|off|none) ;;
-      *) out="#[range=user|picker]#[fg=${BTN_FG},bg=${BTN_BG},bold] ${BTN_LABEL//#/##} #[norange]#[default]#[bg=${BAND}]" ;;
+      *) out="#[range=user|picker]#[fg=${BTN_FG},bg=${BTN_BG},bold] ${BTN_LABEL//#/##} #[norange]#[default]#[bg=${BAND}]"
+         segw=$(( segw + ${#BTN_LABEL} + 2 )); nseg=$(( nseg + 1 )) ;;
     esac
     while IFS= read -r name; do
       i=$((i+1))
@@ -91,25 +134,205 @@ case "${1:-}" in
       # execution — job output is not re-expanded — but it does wreck the row.)
       disp="${name//#/##}"
       if [ "$name" = "$current" ]; then
+        cur_i=$i; cur_name="$name"
         seg="#[range=user|session_${i}]#[fg=$ACCENT_FG,bg=$ACCENT,bold] ${i}:${disp} #[norange]#[default]#[bg=$BAND]"
       else
         seg="#[range=user|session_${i}]#[fg=$PILL_FG,bg=$PILL_BG] ${i}:${disp} #[norange]#[default]#[bg=$BAND]"
       fi
       out="${out:+$out }$seg"
+      segw=$(( segw + ${#i} + 1 + ${#name} + 2 )); nseg=$(( nseg + 1 ))
     done <<EOF
 $list
 EOF
-    printf '%s' "$out"
+    total=$(( 1 + segw + nseg - 1 ))
+
+    # Does it fit? Only collapse when we were told a width. @agent_tmux_narrow_width
+    # forces a fixed breakpoint for people who want one; the default is the honest
+    # question "is this actually too wide", which needs no magic number.
+    narrow=0
+    # @agent_tmux_menu_label off/none disables narrow mode entirely: the rail
+    # always renders wide and simply gets clipped, which is what the VHS pixel
+    # scenarios need (their sampler assumes a fixed 7 columns per pill).
+    case "$MENU_LABEL" in ''|off|none) width='' ;; esac
+    case "$width" in
+      ''|*[!0-9]*) ;;
+      *) if [ -n "$NARROW" ]; then
+           case "$NARROW" in *[!0-9]*) ;; *) [ "$width" -lt "$NARROW" ] && narrow=1 ;; esac
+         else
+           [ "$total" -gt "$width" ] && narrow=1
+         fi ;;
+    esac
+
+    # Stage the menu for the mouse path. A menu opened from an ASYNC run-shell
+    # cannot be operated by mouse at all: display-menu sets MENU_NOMOUSE when the
+    # invoking command carries no mouse event, and a NOMOUSE menu ignores every
+    # press and closes on every release -- verified, the tap opens nothing. The
+    # binding therefore uses `run-shell -C "#{@agent_menu_cmd}"`, which runs a
+    # tmux command on the SAME queue item and keeps the mouse event, so the
+    # command line has to be sitting in an option ready to go.
+    # Deliberately NOT named @agent_tmux_* so load_opts never parses it.
+    tmux set-option -g @agent_menu_cmd "$("$0" menu-cmd "" 0 2>/dev/null)" 2>/dev/null
+
+    if [ "$narrow" -eq 0 ]; then
+      printf '%s' "$out"
+      exit 0
+    fi
+
+    # --- narrow: hamburger + attention badge + the current session alone -------
+    nout="#[range=user|menu]#[fg=${BTN_FG},bg=${BTN_BG},bold] ${MENU_LABEL//#/##} #[norange]#[default]#[bg=${BAND}]"
+    n_block=0; n_wait=0
+    while IFS= read -r st; do
+      case "$st" in blocked) n_block=$((n_block+1)) ;; waiting) n_wait=$((n_wait+1)) ;; esac
+    done <<EOF
+$(tmux list-panes -a -F '#{@agent_state}' 2>/dev/null)
+EOF
+    n_att=$(( n_block + n_wait ))
+    if [ "$n_att" -gt 0 ]; then
+      # Highest concern wins, same priority as the window tabs: blocked > waiting.
+      if [ "$n_block" -gt 0 ]; then bcol="$S_BLOCKED"; else bcol="$S_WAITING"; fi
+      # Also a `menu` range: on a phone the badge is the thing you aim at.
+      nout="$nout #[range=user|menu]#[fg=${ACCENT_FG},bg=${bcol},bold] ●${n_att} #[norange]#[default]#[bg=${BAND}]"
+    fi
+    if [ "$cur_i" -gt 0 ]; then
+      nout="$nout #[range=user|session_${cur_i}]#[fg=$ACCENT_FG,bg=$ACCENT,bold] ${cur_i}:${cur_name//#/##} #[norange]#[default]#[bg=$BAND]"
+    fi
+    printf '%s' "$nout"
+    ;;
+  menu|menu-args|menu-cmd)
+    mode="$1"; client="${2:-}"; load_opts
+    SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+    # Menu item names AND commands are formats: tmux expands them when the menu
+    # is drawn and again when an item is chosen. Two rules follow.
+    #  * Any session name reaching a NAME must have '#' doubled, exactly like the
+    #    rail -- else a session called '#[bg=red]evil' repaints the menu row.
+    #  * No COMMAND ever embeds a name. Sessions are addressed by rail index and
+    #    panes by pane id -- digits and '%' only -- so an apostrophe in a name
+    #    ("it's") cannot break the quoting: -t '=it's' resolves to "its".
+    esc(){ printf '%s' "${1//#/##}"; }
+    q(){ local v="${1//\\/\\\\}"; v="${v//\"/\\\"}"; printf '"%s"' "$v"; }
+    # Never a two-character key: tmux cannot parse "10" and silently renders the
+    # item with NO shortcut, making it unreachable from the keyboard.
+    LETTERS='qwertyuiopzxcvbn'
+    mkey(){ case "$1" in [1-9]) printf '%s' "$1" ;; *) printf '%s' "${LETTERS:$(( $1 - 10 )):1}" ;; esac; }
+
+    # A menu taller than the client draws NOTHING at all (max items is about
+    # client_height - 2), so cap and offer an overflow entry instead.
+    cap="${3:-0}"
+    case "$cap" in ''|*[!0-9]*) cap=0 ;; esac
+    if [ "$cap" -eq 0 ]; then
+      h="$(tmux display-message ${client:+-c "$client"} -p '#{client_height}' 2>/dev/null)"
+      case "$h" in ''|*[!0-9]*) h=24 ;; esac
+      cap=$(( h - 4 ))
+    fi
+    [ "$MENU_MAX" -gt 0 ] 2>/dev/null && [ "$cap" -gt "$MENU_MAX" ] && cap="$MENU_MAX"
+    [ "$cap" -lt 4 ] && cap=4
+
+    args=(); n=0
+    att="$(tmux list-panes -a -F '#{@agent_state}|#{session_name}|#{window_index}|#{pane_index}|#{pane_id}' 2>/dev/null \
+           | grep -E '^(blocked|waiting)\|' | sort)"
+    if [ -n "$att" ]; then
+      args+=( "-needs you" '' '' ); n=$((n+1)); k=0
+      while IFS='|' read -r st sess win pane pid; do
+        [ -n "${st:-}" ] || continue
+        n=$((n+1)); [ "$n" -ge "$cap" ] && break
+        k=$((k+1))
+        # No #[fg=] here: tmux counts the style bytes toward the item's width and
+        # truncates the visible text with a '>'. The !/* marks carry the
+        # distinction instead, and they survive a monochrome phone terminal.
+        case "$st" in blocked) mark='!' ;; *) mark='*' ;; esac
+        args+=( "${mark} $(esc "$sess"):${win}.${pane}  ${st}" \
+                "$(mkey $((k+9)))" \
+                "run-shell \"$SELF focus '$pid' '#{client_name}'\"" )
+      done <<EOF
+$att
+EOF
+      args+=( '' ); n=$((n+1))
+    fi
+
+    args+=( "-sessions" '' '' ); n=$((n+1))
+    i=0; over=0
+    while IFS= read -r name; do
+      i=$((i+1)); n=$((n+1))
+      if [ "$n" -ge "$cap" ]; then over=1; break; fi
+      # The bullet is a FORMAT, not baked in: one staged command serves clients
+      # sitting on different sessions, because tmux expands it per client.
+      args+=( "${i}: $(esc "$name")#{?#{==:#{session_name},$(esc "$name")},  •,}" \
+              "$(mkey "$i")" \
+              "run-shell \"$SELF jump $i '#{client_name}'\"" )
+    done <<EOF
+$(sessions)
+EOF
+    [ "$over" -eq 1 ] && args+=( "all sessions…" s "run-shell \"$SELF click picker '#{client_name}'\"" )
+    args+=( '' "new project…" p "run-shell \"$SELF click picker '#{client_name}'\"" )
+
+    case "$mode" in
+      menu-args) printf '%s\n' "${args[@]}"; exit 0 ;;
+      menu-cmd)
+        # ONE line, always: this is stored in a tmux option and read back by
+        # `run-shell -C`, and both are line-oriented.
+        # -O keeps the menu open when the release half of the opening tap
+        # arrives; `--` is load-bearing because the first item is a disabled
+        # header whose name starts with '-', which tmux would parse as a flag.
+        out="display-menu -O -x 0 -y S -T $(q "#[align=centre] ${MENU_LABEL} ") --"
+        for a in "${args[@]}"; do out="$out $(q "$a")"; done
+        printf '%s' "${out//$'\n'/ }"; printf '\n'; exit 0 ;;
+    esac
+    # Keyboard path. `--` is load-bearing: the first item is a disabled section
+    # header whose name starts with '-', and without a terminator tmux parses it
+    # as a flag and dies with "unknown flag -n".
+    tmux display-menu ${client:+-c "$client"} -x 0 -y S \
+      -T "#[align=centre] ${MENU_LABEL} " -- "${args[@]}"
+    exit 0
+    ;;
+  focus)
+    pane="${2:-}"; client="${3:-}"
+    [ -n "$pane" ] || exit 0
+    sess="$(tmux display-message -p -t "$pane" '#{session_name}' 2>/dev/null)" || exit 0
+    win="$(tmux display-message -p -t "$pane" '#{window_id}' 2>/dev/null)"
+    [ -n "$sess" ] || exit 0
+    tmux switch-client ${client:+-c "$client"} -t "=$sess" 2>/dev/null
+    tmux select-window -t "$win" 2>/dev/null
+    tmux select-pane -t "$pane" 2>/dev/null
+    exit 0
+    ;;
+  refresh)
+    # refresh-client -S with no -t refreshes ONE client (tmux's "current" one),
+    # so on a phone+laptop pair the other terminal keeps a stale rail until the
+    # status interval. Refresh every attached client explicitly.
+    while IFS= read -r c; do
+      [ -n "$c" ] && tmux refresh-client -S -t "$c" 2>/dev/null
+    done <<EOF
+$(tmux list-clients -F '#{client_name}' 2>/dev/null)
+EOF
+    exit 0
+    ;;
+  route)
+    route_of "${2:-}"; printf '\n'; exit 0
     ;;
   click)
-    range="${2:-}"; client="${3:-}"
-    case "$range" in
-      session_*) exec "$0" jump "${range#session_}" "$client" ;;
+    range="${2:-}"; client="${3:-}"; mx="${4:-}"; my="${5:-}"
+    # shellcheck disable=SC2046 -- route_of returns at most "jump N"
+    set -- $(route_of "$range")
+    case "${1:-none}" in
+      jump) exec "$0" jump "$2" "$client" ;;
+      menu) exec "$0" menu "$client" ;;
+      picker)
+        # -c is what makes this work from run-shell, which carries no client of
+        # its own; without it tmux picks its "best" client and the popup can open
+        # on somebody else's terminal.
+        pk="$(tmux show-option -gqv @agent_tmux_picker 2>/dev/null)"
+        [ -n "$pk" ] || pk="$(cd "$(dirname "$0")" && pwd)/tmux-sessionizer"
+        # Backgrounded: display-popup blocks until dismissed, and run-shell
+        # without -b holds tmux's command queue the whole time.
+        ( tmux display-popup ${client:+-c "$client"} -E "$pk" >/dev/null 2>&1 & ) ;
+        ;;
     esac
     exit 0
     ;;
   *)
-    echo "usage: tmux-sessions status [current] | jump N [client] | click RANGE [client]" >&2
+    echo "usage: tmux-sessions status [current] [width] | jump N [client] |" >&2
+    echo "       click RANGE [client] [x] [y] | route RANGE | menu[-args] CLIENT" >&2
     exit 2
     ;;
 esac

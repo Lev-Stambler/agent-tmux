@@ -46,6 +46,37 @@ chk "pills + picker button" "+ 1:api 2:web" "$PLAIN"
 case "$ROW" in *'range=user|picker'*) ok "picker button is clickable";; *) bad "no picker range";; esac
 case "$ROW" in *'range=user|session_2'*) ok "pills are clickable";; *) bad "no session range";; esac
 
+echo "== 3b. narrow screen: the rail collapses to a hamburger =="
+SESS="$HOME/.tmux/plugins/agent-tmux/scripts/tmux-sessions"
+narrow(){ TMUX="$(tmux -L $S display-message -p '#{socket_path},0,0')" \
+  bash "$SESS" status api "$1" | sed 's/#\[[^]]*\]//g; s/  */ /g; s/^ *//; s/ *$//'; }
+# this rail is only ~20 columns (two short names), so the collapse width has to
+# be genuinely below that -- a real phone hits it with real session names.
+chk "wide client keeps the rail" "+ 1:api 2:web" "$(narrow 120)"
+chk "narrow client collapses"    "☰ 1:api"      "$(narrow 14)"
+RAW="$(TMUX="$(tmux -L $S display-message -p '#{socket_path},0,0')" bash "$SESS" status api 14)"
+case "$RAW" in *'range=user|menu'*) ok "hamburger is tappable";; *) bad "no menu range";; esac
+chk "menu routes"   menu   "$(bash "$SESS" route menu)"
+chk "picker routes" picker "$(bash "$SESS" route picker)"
+
+# Does this tmux actually UNDERSTAND status-bar ranges? Emitting them is not the
+# same as tmux reporting them: range=user|X and #{mouse_status_range} landed in
+# 3.4, so on 3.2a/3.3a the rail renders and is completely unclickable. Asserting
+# only that ranges are EMITTED is how that shipped unnoticed.
+# An unknown format expands to "" on old tmux, exactly like a known-but-empty
+# one, so the version is the only honest discriminator.
+TV="$(tmux -V | sed 's/^tmux //; s/^next-//; s/[^0-9.].*$//')"
+TMAJ="${TV%%.*}"; TMIN="${TV#*.}"; TMIN="${TMIN%%.*}"
+WARN="$(tmux -L $S show-option -gv @agent_tmux_warning 2>/dev/null)"
+if [ "$TMAJ" -eq 3 ] && [ "$TMIN" -lt 4 ]; then
+  echo "  note: tmux $TV predates status-bar click reporting (3.4)"
+  case "$WARN" in *3.4*) ok "the plugin warns that clicking is unavailable";;
+                  *) bad "no @agent_tmux_warning on a tmux that cannot click";; esac
+else
+  ok "tmux $TV reports status ranges (clicking works)"
+  chk "no spurious click warning" "" "$WARN"
+fi
+
 echo "== 4. bindings a stranger gets for free =="
 for k in p o g G 1 3 9; do
   tmux -L $S list-keys -T prefix "$k" >/dev/null 2>&1 && ok "prefix+$k bound" || bad "prefix+$k MISSING"
@@ -61,7 +92,7 @@ chk "status-left is still tmux's default" "[#{session_name}] " "$(tmux -L $S sho
 echo "== 6. reload is idempotent (prefix+I / prefix+R) =="
 for i in 1 2 3; do TMUX="$(tmux -L $S display-message -p '#{socket_path},0,0')" \
   bash "$HOME/.tmux/plugins/agent-tmux/agent-tmux.tmux" >/dev/null 2>&1; done
-chk "hooks not stacked" 5 "$(tmux -L $S show-hooks -g | grep -c 'refresh-client -S')"
+chk "hooks not stacked" 5 "$(tmux -L $S show-hooks -g | grep -c 'tmux-sessions refresh')"
 
 echo "== 7. the rail follows session lifecycle =="
 tmux -L $S new-session -d -s zzz

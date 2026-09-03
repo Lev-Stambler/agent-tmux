@@ -37,12 +37,27 @@ and one working pane reads red.
 (or creates) a session for it. `prefix` + `o` fuzzy-finds an existing session,
 with a live preview and `ctrl-d` to kill.
 
+**On a phone.** Below the width where the rail fits, row 1 collapses to a `☰`
+button, a badge counting the agents that want you, and the session you are in.
+Tap the hamburger — or press `prefix` + `m` — for a menu of exactly the things
+worth reaching from a phone: panes that are blocked or waiting, every session,
+and the project picker.
+
+<img src="docs/mobile.gif" alt="the rail collapsed to a hamburger, and the menu open" width="330">
+
+This is per client. A laptop and a phone attached to the same session at the
+same time each get the row that fits them, because tmux expands `#{client_width}`
+before running the job and caches the result per client.
+
 ## Requirements
 
-- tmux **3.2+** (uses `display-popup`, `#[fill=]`, `range=user`). On anything
-  older the plugin refuses to load and says so rather than half-installing —
-  `tmux show-option -gv @agent_tmux_error` has the reason. Verified against
-  3.0a, 3.2a, 3.3a and 3.4.
+- tmux **3.2+**. On anything older the plugin refuses to load and says so rather
+  than half-installing — `tmux show-option -gv @agent_tmux_error` has the reason.
+- **tmux 3.4+ to click the status bar.** `range=user` and `#{mouse_status_range}`
+  arrived in 3.4, so on 3.2/3.3 the rail and the colours render and every key
+  works, but taps do nothing. The plugin detects this and leaves the reason in
+  `@agent_tmux_warning`. Verified against 3.0a, 3.2a, 3.3a and 3.4 — Ubuntu 22.04
+  and Debian 12 ship versions that cannot click.
 - `bash` and `fzf`
 - Optional: `jq`, for exact background-task detection in the Claude hook payload
 
@@ -79,18 +94,31 @@ report their lifecycle, which is two bits of config outside tmux.
 In `~/.claude/settings.json` — `$AT` is wherever you cloned the plugin
 (`tmux show-option -gv @agent_tmux_dir` prints it):
 
+Each hook maps an event to one state. They all have the same shape:
+
 ```json
 {
   "hooks": {
-    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "$AT/scripts/agent-status.sh clear" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "$AT/scripts/agent-status.sh working" }] }],
-    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "$AT/scripts/agent-status.sh working" }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "$AT/scripts/agent-status.sh waiting" }] }],
-    "PermissionRequest":[{ "hooks": [{ "type": "command", "command": "$AT/scripts/agent-status.sh blocked" }] }],
-    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "$AT/scripts/agent-status.sh clear" }] }]
+    "SessionStart": [
+      { "hooks": [
+        { "type": "command",
+          "command": "$AT/scripts/agent-status.sh clear" }
+      ] }
+    ]
   }
 }
 ```
+
+The full set, event to argument:
+
+| event | argument |
+|-------|----------|
+| `SessionStart` | `clear` |
+| `UserPromptSubmit` | `working` |
+| `PostToolUse` | `working` |
+| `Stop` | `waiting` |
+| `PermissionRequest` | `blocked` |
+| `SessionEnd` | `clear` |
 
 ### Codex
 
@@ -112,7 +140,9 @@ the pane and `$TMUX_PANE` is empty. A shell wrapper does it:
 ```bash
 codex() {
   case "$1" in
-    exec|e|review|login|logout|mcp|mcp-server|app-server|exec-server|remote-control|completion|update|doctor|sandbox|debug|apply|a|archive|unarchive|cloud|features|help)
+    exec|e|review|login|logout|mcp|mcp-server|app-server|exec-server\
+    |remote-control|completion|update|doctor|sandbox|debug|apply|a\
+    |archive|unarchive|cloud|features|help)
       command codex "$@" ;;
     *)
       command codex -c features.tui_app_server=false "$@" ;;
@@ -132,6 +162,8 @@ resolve a pane when exactly one Codex pane is running in that directory.
 | click `+` | open the project picker |
 | `prefix` + `p` | project picker (fuzzy-find a directory) |
 | `prefix` + `o` | session picker (fuzzy-find a session, `ctrl-d` kills) |
+| `prefix` + `m` | open the ☰ menu (works with no mouse at all) |
+| tap `☰` | same menu, on a phone |
 | `prefix` + `g` | mark the current pane acked (green) |
 | `prefix` + `G` | clear the current pane's state |
 
@@ -192,6 +224,10 @@ You will also want `set -g extended-keys on`.
 | `@agent_tmux_row` | `1` | which status row holds the rail |
 | `@agent_tmux_status_interval` | *unset* | left alone on purpose — see below |
 | `@agent_tmux_picker` | bundled | command the picker button and `prefix`+`p` run |
+| `@agent_tmux_menu_key` | `m` | prefix key that opens the ☰ menu; `off` unbinds |
+| `@agent_tmux_menu_label` | `☰` | narrow-mode glyph; `off` disables narrow mode entirely |
+| `@agent_tmux_menu_max` | `12` | item cap before an "all sessions…" entry |
+| `@agent_tmux_narrow_width` | *unset* | also collapse below this width, on top of the fit test |
 
 Colors, all Catppuccin Mocha by default:
 
@@ -231,10 +267,10 @@ There is a regression test for exactly this.
 ## Tests
 
 ```sh
-bash tests/tmux-sessions.test.sh    # the rail: numbering, pills, jump, click, button
-bash tests/agent-status.test.sh     # state aggregation, theme restoration, palette
-tests/vhs/run.sh                    # renders real tmux and pixel-samples the colors
-tests/cleanroom.sh                  # fresh containers: does this work for a stranger?
+bash tests/tmux-sessions.test.sh   # the rail, narrow mode, the menu
+bash tests/agent-status.test.sh    # state aggregation and theming
+tests/vhs/run.sh                   # renders tmux, samples the pixels
+tests/cleanroom.sh                 # fresh containers, five tmux versions
 ```
 
 The first two use a throwaway `tmux -L <socket>` server and never touch your live
@@ -254,8 +290,14 @@ always has their own dotfiles in it, so it cannot tell you what a stranger sees.
   macOS it falls back to BSD `ps`. The normal `$TMUX_PANE` path is unaffected.
 - `prefix` + `p` and `prefix` + `o` overwrite tmux's defaults for those keys
   (`previous-window` and `select-pane -t :.+`). Rebind them if you want them back.
-- The rail lists every session on the server, so it gets crowded past ~10
-  sessions on a narrow terminal.
+- Clicking needs tmux 3.4 (see Requirements). Keys work everywhere from 3.2.
+- The ☰ menu is capped to what fits the client: a menu taller than the terminal
+  draws *nothing at all* in tmux, so past the cap the rest moves behind an
+  "all sessions…" entry.
+- Menu item labels carry no colour. tmux counts style bytes toward an item's
+  width and truncates the visible text, so the `!` and `*` marks do that job.
+- Session-name width is counted in characters, not display columns, so a name
+  with CJK or emoji makes the rail slightly wider than the fit test believes.
 
 ## License
 

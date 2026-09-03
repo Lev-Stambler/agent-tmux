@@ -128,5 +128,48 @@ colour_gif aggregate \
    bash $SS $S $A working </dev/null
    bash $SS $S $B working </dev/null; sleep 2.5' 14
 
+# ------------------------------------------------------------------ mobile --
+# A phone-width terminal: the rail collapses to the hamburger, and prefix+m
+# opens the menu. Rendered NARROW on purpose -- the wide 900px GIFs scale down
+# to ~6px text on a phone, which is the thing this whole change is about.
+cat > "$OUT/.m.run.sh" <<CONF
+#!/usr/bin/env bash
+S=atxmobile
+tmux -L \$S kill-server 2>/dev/null
+B='bash --rcfile $OUT/.demo.rc -i'
+tmux -L \$S -f "$OUT/.demo.conf" new-session -d -s api -n app -x 44 -y 22 "\$B"
+for s_ in infra web payments search; do tmux -L \$S new-session -d -s \$s_ -n app "\$B"; done
+for s_ in api infra web payments search; do tmux -L \$S rename-window -t \$s_:1 app; done
+tmux -L \$S set-option -p -t search @agent_state blocked
+tmux -L \$S set-option -p -t web    @agent_state waiting
+exec tmux -L \$S attach -t api
+CONF
+chmod +x "$OUT/.m.run.sh"
+cat > "$OUT/.m.tape" <<CONF
+Output "$OUT/mobile.gif"
+Set Shell "bash"
+Set Width 430
+Set Height 440
+Set FontSize 16
+Set Padding 0
+Set Margin 0
+Set Theme "Catppuccin Mocha"
+Set Framerate 10
+Sleep 300ms
+Hide
+Type "bash $OUT/.m.run.sh"
+Enter
+Sleep 3s
+Show
+Sleep 2500ms
+Ctrl+b
+Sleep 400ms
+Type "m"
+Sleep 5s
+CONF
+vhs "$OUT/.m.tape"
+tmux -L atxmobile kill-server 2>/dev/null || true
+echo "wrote $OUT/mobile.gif"
+
 [ -n "${KEEP:-}" ] || rm -f "$OUT/.demo.conf" "$OUT/.demo.run.sh" "$OUT/.demo.tape" "$OUT/.demo.rc" \
-      "$OUT/.c.run.sh" "$OUT/.c.tape"
+      "$OUT/.c.run.sh" "$OUT/.c.tape" "$OUT/.m.run.sh" "$OUT/.m.tape"

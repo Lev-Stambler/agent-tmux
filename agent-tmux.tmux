@@ -29,6 +29,18 @@ fi
 
 opt(){ local v; v="$(tmux show-option -gqv "$1" 2>/dev/null)"; [ -n "$v" ] && printf '%s' "$v" || printf '%s' "$2"; }
 
+# Clicking the status bar needs `range=user|X` and #{mouse_status_range}, which
+# landed in tmux 3.4 -- NOT 3.2. Confirmed by inspecting the shipped binaries:
+# the symbol is absent from Ubuntu 22.04's 3.2a and Debian 12's 3.3a and present
+# in 3.4. Below 3.4 the rail and the colours render fine and every key binding
+# works; only the mouse is dead, so warn rather than refuse.
+CLICKABLE=1
+if [ "$v_maj" -eq 3 ] && [ "$v_min" -lt 4 ]; then
+  CLICKABLE=0
+  tmux set-option -g @agent_tmux_warning \
+    "agent-tmux: tmux $ver cannot report status-bar clicks (needs 3.4); the rail renders but is not clickable - use prefix+1..9 and the menu key" 2>/dev/null
+fi
+
 ROW="$(opt @agent_tmux_row 1)"
 BAND="$(opt @agent_tmux_band '#181825')"
 # Empty by default: we deliberately do NOT write status-interval. tmux-sensible
@@ -50,8 +62,13 @@ STATUS="$DIR/scripts/agent-status.sh"
 # add a row and paint row $ROW. catppuccin & friends never write status-format,
 # so this composes regardless of plugin load order.
 tmux set-option -g status 2
+# '#{client_width}' is expanded PER CLIENT before the job runs, and tmux caches
+# job output by command string -- so a laptop and a phone attached to the same
+# session at the same time get different rows. Verified: two real clients at 140
+# and 59 columns each ran the job with their own width, and a resize re-ran it
+# with no client-resized hook needed.
 tmux set-option -g status-format[$ROW] \
-  "#[fill=$BAND]#[bg=$BAND,align=left] #($SESSIONS status '#S')"
+  "#[fill=$BAND]#[bg=$BAND,align=left] #($SESSIONS status '#S' '#{client_width}')"
 [ -n "$INTERVAL" ] && tmux set-option -g status-interval "$INTERVAL"
 
 # The pills only change when the session list or the attached session changes,
@@ -64,9 +81,15 @@ tmux set-option -g status-format[$ROW] \
 #  * No client. session-created fires while a session is being built, before any
 #    client is attached, and a bare `refresh-client -S` there prints
 #    "no current client" into the pane. Redirecting inside run-shell swallows it.
-refresh_cmd='run-shell -b "tmux refresh-client -S 2>/dev/null || true"'
+# `refresh-client -S` with no -t refreshes ONE client, so with a phone and a
+# laptop attached the other one keeps a stale rail until the status interval.
+# The `refresh` subcommand walks every attached client instead.
+refresh_cmd="run-shell -b \"$SESSIONS refresh\""
 for h in session-created session-closed session-renamed client-session-changed client-attached; do
-  tmux show-hooks -g 2>/dev/null | grep -q "^$h\(\[[0-9]*\]\)\? .*refresh-client -S" && continue
+  # migrate off the v1 single-client hook if it is still installed
+  tmux show-hooks -g 2>/dev/null | grep -q "^$h\(\[[0-9]*\]\)\? .*refresh-client -S 2" \
+    && tmux set-hook -gu "$h" 2>/dev/null
+  tmux show-hooks -g 2>/dev/null | grep -q "^$h\(\[[0-9]*\]\)\? .*tmux-sessions refresh" && continue
   tmux set-hook -ga "$h" "$refresh_cmd" 2>/dev/null
 done
 
@@ -98,16 +121,53 @@ case "$JUMP" in
     done ;;
 esac
 
+# The hamburger menu, reachable without a mouse: plenty of mobile SSH clients
+# never send mouse events, and it is the only way to reach another session once
+# the rail has collapsed.
+MENUKEY="$(opt @agent_tmux_menu_key 'm')"
+[ "$MENUKEY" = off ] || tmux bind-key "$MENUKEY" run-shell -b "$SESSIONS menu '#{client_name}'"
+
+# Seed the staged menu so the very first tap works, before any status redraw.
+tmux set-option -g @agent_menu_cmd "$("$SESSIONS" menu-cmd "" 0 2>/dev/null)" 2>/dev/null
+
 # Click routing for the status bar:
 #   session_N -> switch to that session
 #   picker    -> open the project picker (display-popup needs the client context
 #                that a key binding has and run-shell does not)
 #   anything else (i.e. row 0's window tabs) -> stock select-window
-tmux bind-key -n MouseDown1Status if-shell -F '#{m:session_*,#{mouse_status_range}}' \
-  "run-shell \"$SESSIONS click '#{mouse_status_range}' '#{client_name}'\"" \
-  "if-shell -F '#{==:#{mouse_status_range},picker}' \
-     'display-popup -E \"$PICKER\"' \
-     'select-window -t ='"
+# Routing branches on WHICH ROW was clicked before it looks at range names. That
+# makes row 0's window tabs untouchable by construction, rather than relying on
+# nothing else ever emitting a session_* range.
+#
+# Everything past that lives in `tmux-sessions click`, not in nested if-shell:
+# the script takes the client explicitly and passes it to display-popup/-menu
+# with -c, so it has the client context that run-shell alone does not. That
+# keeps the routing in testable bash instead of four levels of tmux quoting.
+# The `menu` branch MUST be `run-shell -C`, not a plain run-shell. display-menu
+# sets MENU_NOMOUSE when the invoking command has no mouse event, and such a menu
+# ignores every press and closes on every release -- a tap opens literally
+# nothing. `run-shell -C` runs a tmux command on the SAME queue item, keeping the
+# mouse event; -O then stops the release half of the opening tap dismissing it.
+# Verified both ways with injected SGR mouse sequences.
+# Routing, and why it looks like this.
+#
+# `if-shell` runs its chosen branch as a NEW command-queue item, which does not
+# carry the mouse event. display-menu sets MENU_NOMOUSE when the invoking command
+# has no mouse event, and such a menu ignores every press and closes on every
+# release -- so a menu opened behind an if-shell literally cannot be tapped.
+# Measured: bound directly, a tap opens the menu and it stays; behind one
+# if-shell, the identical command opens nothing.
+#
+# So there is exactly ONE command here, `run-shell -C`, which runs a tmux command
+# on the SAME queue item and keeps the mouse event. The branching is done in the
+# FORMAT instead, and every branch is a bare option reference -- never an inline
+# command -- because a #{?a,b,c} branch cannot contain a comma, and the menu
+# command line is full of them.
+tmux set-option -g @agent_tmux_row0 'select-window -t ='
+tmux set-option -g @agent_tmux_clickcmd \
+  "run-shell -b \"$SESSIONS click #{mouse_status_range} #{client_name}\""
+tmux bind-key -n MouseDown1Status run-shell -C \
+  "#{?#{!=:#{mouse_status_line},$ROW},#{@agent_tmux_row0},#{?#{==:#{mouse_status_range},menu},#{@agent_menu_cmd},#{@agent_tmux_clickcmd}}}"
 
 # ------------------------------------------------------------ agent  colors --
 if [ "$COLORS" != "off" ]; then
