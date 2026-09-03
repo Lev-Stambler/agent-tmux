@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -gt 1 ]]; then
+  printf "Usage: %s [directory]\n" "$(basename "$0")" >&2
+  exit 1
+fi
+
+if ! command -v tmux >/dev/null 2>&1; then
+  printf "tmux is required but not installed.\n" >&2
+  exit 1
+fi
+
+if ! command -v fzf >/dev/null 2>&1; then
+  printf "fzf is required but not installed.\n" >&2
+  exit 1
+fi
+
+IFS=':' read -r -a roots <<< "${MUX_PATHS:-$HOME/code:$HOME/work}"
+search_roots=()
+for root in "${roots[@]}"; do
+  [[ -d "$root" ]] && search_roots+=("$root")
+done
+
+if [[ $# -eq 1 ]]; then
+  selected="$1"
+else
+  if [[ ${#search_roots[@]} -eq 0 ]]; then
+    printf "No valid MUX_PATHS directories found.\n" >&2
+    exit 1
+  fi
+
+  max_depth="${MUX_MAX_DEPTH:-5}"
+  set +o pipefail
+  selected="$(find "${search_roots[@]}" -mindepth 1 -maxdepth "$max_depth" -type d \
+    -not -path '*/.git/*' \
+    -not -path '*/node_modules/*' \
+    -not -path '*/.venv/*' \
+    -not -path '*/venv/*' \
+    2>/dev/null | fzf \
+      --prompt='Folder > ' \
+      --height=85% \
+      --reverse \
+      --border \
+      --preview 'ls -la {}' \
+      --preview-window='right,55%' || true)"
+  set -o pipefail
+fi
+
+[[ -z "${selected:-}" ]] && exit 0
+[[ ! -d "$selected" ]] && {
+  printf "Not a directory: %s\n" "$selected" >&2
+  exit 1
+}
+
+selected="$(realpath "$selected")"
+base_name="$(basename "$selected" | tr -cs 'A-Za-z0-9_-' '_')"
+base_name="${base_name##_}"
+base_name="${base_name%%_}"
+[[ -z "$base_name" ]] && base_name="session"
+session_name="$base_name"
+
+if tmux has-session -t="$session_name" 2>/dev/null; then
+  existing_project_path="$(tmux show-options -t "$session_name" -qv @project_path || true)"
+  if [[ "$existing_project_path" != "$selected" ]]; then
+    path_hash="$(printf '%s' "$selected" | shasum | cut -c1-6)"
+    session_name="${base_name}_${path_hash}"
+  fi
+fi
+
+if ! tmux has-session -t="$session_name" 2>/dev/null; then
+  tmux new-session -d -s "$session_name" -c "$selected"
+  tmux set-option -t "$session_name" -q @project_path "$selected"
+fi
+
+if [[ -n "${TMUX:-}" ]]; then
+  target_client="${TMUX_TARGET_CLIENT:-$(tmux display-message -p '#{client_tty}' 2>/dev/null || true)}"
+  [[ "$target_client" == "#{client_tty}" ]] && target_client=""
+  if [[ -n "$target_client" ]]; then
+    tmux switch-client -c "$target_client" -t "$session_name" || tmux switch-client -t "$session_name"
+  else
+    tmux switch-client -t "$session_name"
+  fi
+else
+  tmux attach-session -t "$session_name"
+fi

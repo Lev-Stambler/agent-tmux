@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# tmux-sessions — renders status row 1 and handles its click/jump routing.
+#
+#   status [current]  the row itself: an optional picker button followed by
+#                     "1:alpha 2:bravo ..." as pills on a solid band. <current>
+#                     sits on the accent pill, the rest on dim pills. Every
+#                     entry is a clickable #[range=user|session_N]; the button
+#                     is #[range=user|picker].
+#   jump N [client]   switch <client> (default: current client) to the Nth
+#                     session, numbering sessions alphabetically by name
+#                     (tmux's native list-sessions order — same as prefix+o).
+#   click RANGE [client]
+#                     MouseDown1Status handler: jumps when RANGE is a
+#                     session_N user range, no-op for anything else. The
+#                     picker range is handled by the key binding, not here —
+#                     display-popup needs a client context only a binding has.
+#
+# Colors and the button come from @agent_tmux_* options (see agent-tmux.tmux);
+# the defaults below are Catppuccin Mocha so it looks right out of the box.
+set -u
+
+# --- palette: one `show-options` fork, defaults when the plugin isn't loaded ---
+ACCENT='#cba6f7'     # mauve    — current-session pill
+ACCENT_FG='#11111b'  # crust    — text on the accent pill
+PILL_BG='#313244'    # surface0 — other-session pills
+PILL_FG='#a6adc8'    # subtext0 — text on dim pills
+BAND='#181825'       # mantle   — row background between pills
+BTN_BG='#313244'     # button pill background
+BTN_FG='#cba6f7'     # button glyph
+BTN_LABEL='+'        # button glyph; empty or "off" hides the button
+
+load_opts(){
+  local opts
+  opts="$(tmux show-options -g 2>/dev/null | grep '^@agent_tmux_' 2>/dev/null)" || return 0
+  [ -n "$opts" ] || return 0
+  local k v
+  while IFS= read -r line; do
+    k="${line%% *}"; v="${line#* }"
+    v="${v%\"}"; v="${v#\"}"
+    [ -n "$v" ] || continue
+    case "$k" in
+      @agent_tmux_accent)       ACCENT="$v" ;;
+      @agent_tmux_accent_fg)    ACCENT_FG="$v" ;;
+      @agent_tmux_pill_bg)      PILL_BG="$v" ;;
+      @agent_tmux_pill_fg)      PILL_FG="$v" ;;
+      @agent_tmux_band)         BAND="$v" ;;
+      @agent_tmux_button_bg)    BTN_BG="$v" ;;
+      @agent_tmux_button_fg)    BTN_FG="$v" ;;
+      @agent_tmux_button_label) BTN_LABEL="$v" ;;
+    esac
+  done <<EOF
+$opts
+EOF
+}
+
+sessions(){ tmux list-sessions -F '#{session_name}' 2>/dev/null; }
+
+case "${1:-}" in
+  jump)
+    n="${2:-}"; client="${3:-}"
+    case "$n" in ''|*[!0-9]*) exit 0 ;; esac
+    target="$(sessions | sed -n "${n}p")"
+    [ -n "$target" ] || exit 0
+    if [ -n "$client" ]; then
+      tmux switch-client -c "$client" -t "=$target" 2>/dev/null
+    else
+      tmux switch-client -t "=$target" 2>/dev/null
+    fi
+    exit 0
+    ;;
+  status)
+    current="${2:-}"
+    # Resolve the session list FIRST. If the server is unreachable (e.g. inside a
+    # sandbox with a fresh /tmp) print nothing at all — a lone picker button on an
+    # otherwise empty row is worse than no row.
+    list="$(sessions)" || exit 0
+    [ -n "$list" ] || exit 0
+    load_opts
+    i=0; out=""
+    # The picker button leads the row so its position never shifts as sessions
+    # come and go — muscle memory beats a button that slides around.
+    case "$BTN_LABEL" in
+      ''|off|none) ;;
+      *) out="#[range=user|picker]#[fg=${BTN_FG},bg=${BTN_BG},bold] ${BTN_LABEL} #[norange]#[default]#[bg=${BAND}]" ;;
+    esac
+    while IFS= read -r name; do
+      i=$((i+1))
+      if [ "$name" = "$current" ]; then
+        seg="#[range=user|session_${i}]#[fg=$ACCENT_FG,bg=$ACCENT,bold] ${i}:${name} #[norange]#[default]#[bg=$BAND]"
+      else
+        seg="#[range=user|session_${i}]#[fg=$PILL_FG,bg=$PILL_BG] ${i}:${name} #[norange]#[default]#[bg=$BAND]"
+      fi
+      out="${out:+$out }$seg"
+    done <<EOF
+$list
+EOF
+    printf '%s' "$out"
+    ;;
+  click)
+    range="${2:-}"; client="${3:-}"
+    case "$range" in
+      session_*) exec "$0" jump "${range#session_}" "$client" ;;
+    esac
+    exit 0
+    ;;
+  *)
+    echo "usage: tmux-sessions status [current] | jump N [client] | click RANGE [client]" >&2
+    exit 2
+    ;;
+esac
