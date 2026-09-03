@@ -12,7 +12,11 @@ opt(){ local v; v="$(tmux show-option -gqv "$1" 2>/dev/null)"; [ -n "$v" ] && pr
 
 ROW="$(opt @agent_tmux_row 1)"
 BAND="$(opt @agent_tmux_band '#181825')"
-INTERVAL="$(opt @agent_tmux_status_interval 15)"
+# Empty by default: we deliberately do NOT write status-interval. tmux-sensible
+# only lowers it (15 -> 5) while it is still exactly 15, so writing it here makes
+# the result depend on plugin load order for no benefit — the row is redrawn by
+# hooks, not by polling. Set the option explicitly to override.
+INTERVAL="$(opt @agent_tmux_status_interval '')"
 PATHS="$(opt @agent_tmux_paths "$HOME/code")"
 PICKER="$(opt @agent_tmux_picker "$DIR/scripts/tmux-sessionizer")"
 JUMP="$(opt @agent_tmux_jump_keys prefix)"     # prefix | chord | both | off
@@ -29,12 +33,22 @@ STATUS="$DIR/scripts/agent-status.sh"
 tmux set-option -g status 2
 tmux set-option -g status-format[$ROW] \
   "#[fill=$BAND]#[bg=$BAND,align=left] #($SESSIONS status '#S')"
-tmux set-option -g status-interval "$INTERVAL"
+[ -n "$INTERVAL" ] && tmux set-option -g status-interval "$INTERVAL"
 
 # The pills only change when the session list or the attached session changes,
 # so redraw on those events instead of polling once a second forever.
+#
+# Two things this has to get right:
+#  * Idempotency. set-hook -a APPENDS, and TPM re-runs this file on prefix+I
+#    while tmux-sensible binds prefix+R to re-source the config. Without the
+#    guard the array grows a duplicate every reload, forking N times per event.
+#  * No client. session-created fires while a session is being built, before any
+#    client is attached, and a bare `refresh-client -S` there prints
+#    "no current client" into the pane. Redirecting inside run-shell swallows it.
+refresh_cmd='run-shell -b "tmux refresh-client -S 2>/dev/null || true"'
 for h in session-created session-closed session-renamed client-session-changed client-attached; do
-  tmux set-hook -ga "$h" 'refresh-client -S' 2>/dev/null
+  tmux show-hooks -g 2>/dev/null | grep -q "^$h\(\[[0-9]*\]\)\? .*refresh-client -S" && continue
+  tmux set-hook -ga "$h" "$refresh_cmd" 2>/dev/null
 done
 
 # ------------------------------------------------------------------ pickers --

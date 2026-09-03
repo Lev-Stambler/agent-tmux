@@ -113,6 +113,19 @@ tt set-option -gu @agent_tmux_pill_bg >/dev/null
 OUT="$(run status alpha)"
 case "$OUT" in *'bg=#cba6f7,bold]'*) ok "unset restores the default palette";; *) bad "default not restored: '$OUT'";; esac
 
+echo "== 11. a session name cannot inject style directives into the row =="
+tt new-session -d -s '#[bg=red]evil' >/dev/null 2>&1
+OUT="$(run status alpha)"
+case "$OUT" in
+  *'##[bg=red]evil'*) ok "'#' in a session name is escaped to '##'";;
+  *)                  bad "unescaped name reached the row: '$OUT'";;
+esac
+# every session must still be present and numbered after the hostile one
+N_SESS="$(tt list-sessions -F '#{session_name}' | wc -l)"
+N_PILL="$(printf '%s' "$OUT" | grep -o 'range=user|session_' | wc -l)"
+check "no pill swallowed by the hostile name" "$N_SESS" "$N_PILL"
+tt kill-session -t '#[bg=red]evil' >/dev/null 2>&1
+
 echo
 echo "----------------------------------------"
 printf 'Total: %d passed, %d failed\n' "$PASS" "$FAIL"

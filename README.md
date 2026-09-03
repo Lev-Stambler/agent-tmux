@@ -187,7 +187,7 @@ You will also want `set -g extended-keys on`.
 | `@agent_tmux_button_label` | `+` | picker button glyph; `off` hides it |
 | `@agent_tmux_colors` | `on` | `off` disables the agent state colors |
 | `@agent_tmux_row` | `1` | which status row holds the rail |
-| `@agent_tmux_status_interval` | `15` | redraws are hook-driven; this is a backstop |
+| `@agent_tmux_status_interval` | *unset* | left alone on purpose — see below |
 | `@agent_tmux_picker` | bundled | command the picker button and `prefix`+`p` run |
 
 Colors, all Catppuccin Mocha by default:
@@ -209,6 +209,16 @@ Colors, all Catppuccin Mocha by default:
 
 The rail lives on `status-format[1]`, which themes do not write — so it cannot
 collide, and load order does not matter for it.
+
+**It does not touch `status-interval`.** The row is repainted by hooks on
+`session-created`/`-closed`/`-renamed`, `client-session-changed` and
+`client-attached`, so there is nothing to poll for. Writing the interval would
+also make your setup order-dependent: `tmux-sensible` lowers it from 15 to 5
+only while it is still exactly 15, so a plugin that sets it silently wins or
+loses depending on which loads first. New sessions show up in about a second.
+
+The hooks are installed idempotently — re-running `prefix` + `I` or re-sourcing
+your config will not stack duplicates.
 
 The tab colors set `window-status-format` **per window**, while a theme sets it
 globally. Your theme's value is never overwritten; clearing a pane's state

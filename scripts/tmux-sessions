@@ -81,14 +81,19 @@ case "${1:-}" in
     # come and go — muscle memory beats a button that slides around.
     case "$BTN_LABEL" in
       ''|off|none) ;;
-      *) out="#[range=user|picker]#[fg=${BTN_FG},bg=${BTN_BG},bold] ${BTN_LABEL} #[norange]#[default]#[bg=${BAND}]" ;;
+      *) out="#[range=user|picker]#[fg=${BTN_FG},bg=${BTN_BG},bold] ${BTN_LABEL//#/##} #[norange]#[default]#[bg=${BAND}]" ;;
     esac
     while IFS= read -r name; do
       i=$((i+1))
+      # tmux interprets #[...] in what we print, so a session literally named
+      # "#[bg=red]" would repaint the row and swallow the pills after it.
+      # Doubling '#' makes tmux render it as text. (It cannot reach #() command
+      # execution — job output is not re-expanded — but it does wreck the row.)
+      disp="${name//#/##}"
       if [ "$name" = "$current" ]; then
-        seg="#[range=user|session_${i}]#[fg=$ACCENT_FG,bg=$ACCENT,bold] ${i}:${name} #[norange]#[default]#[bg=$BAND]"
+        seg="#[range=user|session_${i}]#[fg=$ACCENT_FG,bg=$ACCENT,bold] ${i}:${disp} #[norange]#[default]#[bg=$BAND]"
       else
-        seg="#[range=user|session_${i}]#[fg=$PILL_FG,bg=$PILL_BG] ${i}:${name} #[norange]#[default]#[bg=$BAND]"
+        seg="#[range=user|session_${i}]#[fg=$PILL_FG,bg=$PILL_BG] ${i}:${disp} #[norange]#[default]#[bg=$BAND]"
       fi
       out="${out:+$out }$seg"
     done <<EOF
