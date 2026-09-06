@@ -2,11 +2,12 @@
 
 A two-row tmux status bar for people who run a lot of coding agents at once.
 
-The top row is your theme's window tabs, untouched. The bottom row is a rail of
-**numbered session pills** — jump to any session with one keystroke or a click.
-And when a Claude Code or Codex agent in a pane needs you, its **window tab
-changes color**, so you can see which of thirty panes is waiting without looking
-at any of them.
+The top row is your theme's window tabs, plus three buttons — **new window,
+split, split** — and a border around the window you are on. The bottom row is a
+rail of **numbered session pills** — jump to any session with one keystroke or a
+click. And when a Claude Code or Codex agent in a pane needs you, its **window
+tab changes color**, so you can see which of thirty panes is waiting without
+looking at any of them.
 
 ![the session rail tracking the attached session](docs/sessions.gif)
 
@@ -15,6 +16,31 @@ at any of them.
 **The session rail (row 1).** Every session, numbered alphabetically, current one
 on the accent pill. `prefix` + `1..9` jumps. Clicking a pill switches to it. The
 `+` button on the left opens the project picker.
+
+**Window buttons and the current-window border (row 0).** Three pills at the
+left of your theme's row:
+
+| button | does | equivalent |
+|--------|------|------------|
+| `+` | new window, next to this one, in the same directory | `prefix` + `c` |
+| `│` | split the pane left/right | `prefix` + `%` |
+| `────` | split the pane top/bottom | `prefix` + `"` |
+
+![clicking + then the two split buttons](docs/windows.gif)
+
+The window you are on is drawn inside a `▏ ▕` border in the accent colour, so
+the selected tab is obvious even when your theme's active-tab colour is subtle —
+or when an agent has repainted that tab red. Everything else on row 0 is still
+your theme's: the plugin prepends one format reference and leaves the rest
+alone.
+
+**The pane you are in (no columns at all).** The active pane's frame takes the
+accent colour, every other border goes dim, and borders are drawn heavy with
+tmux's arrow indicators on — so with four splits of agent output you can see
+where your keystrokes are going without moving anything. This costs no status
+space: tmux draws those borders anyway. In a window whose agent has a state, the
+state's colour takes over the active pane's border — the *active* one only, so a
+window full of splits still shows you where you are.
 
 **Agent tab colors (row 0).** The window tab shows the highest-priority state
 across *its panes*, so one split never hides another:
@@ -45,9 +71,17 @@ and the project picker.
 
 <img src="docs/mobile.gif" alt="the rail collapsed to a hamburger, and the menu open" width="330">
 
+The row-0 buttons survive at that width too, in a compact form: the pills lose
+the gaps between them but keep their full three-column tap targets, since a
+one-column button is not hittable with a thumb. They sit at the far left, which
+is the part of row 0 that a phone-width terminal does not truncate. If your
+phone's SSH client sends no mouse events at all, the same three actions are in
+the `☰` menu (`prefix` + `m`), under the session list.
+
 This is per client. A laptop and a phone attached to the same session at the
-same time each get the row that fits them, because tmux expands `#{client_width}`
-before running the job and caches the result per client.
+same time each get the row that fits them: the rail's width comes from
+`#{client_width}` in the job tmux runs per client, and the buttons branch on the
+same format, so neither costs anything on the other's screen.
 
 ## Requirements
 
@@ -159,7 +193,9 @@ resolve a pane when exactly one Codex pane is running in that directory.
 |-----|------|
 | `prefix` + `1..9` | jump to the Nth session (the numbers on row 1) |
 | click a pill | switch to that session |
-| click `+` | open the project picker |
+| click `+` on row 1 | open the project picker |
+| click `+` on row 0 | new window, in the current window's directory |
+| click `│` / `─` | split the current pane left/right or top/bottom |
 | `prefix` + `p` | project picker (fuzzy-find a directory) |
 | `prefix` + `o` | session picker (fuzzy-find a session, `ctrl-d` kills) |
 | `prefix` + `m` | open the ☰ menu (works with no mouse at all) |
@@ -226,19 +262,30 @@ You will also want `set -g extended-keys on`.
 | `@agent_tmux_picker` | bundled | command the picker button and `prefix`+`p` run |
 | `@agent_tmux_menu_key` | `m` | prefix key that opens the ☰ menu; `off` unbinds |
 | `@agent_tmux_menu_label` | `☰` | narrow-mode glyph; `off` disables narrow mode entirely |
-| `@agent_tmux_menu_max` | `12` | item cap before an "all sessions…" entry |
+| `@agent_tmux_menu_max` | `15` | item cap before an "all sessions…" entry (12 sessions + the window actions) |
 | `@agent_tmux_narrow_width` | *unset* | also collapse below this width, on top of the fit test |
+| `@agent_tmux_window_buttons` | `on` | `off` leaves row 0 entirely to your theme |
+| `@agent_tmux_new_window_label` | `+` | glyph on the new-window button |
+| `@agent_tmux_split_lr_label` | `│` | glyph on the left/right split button |
+| `@agent_tmux_split_tb_label` | `────` | glyph on the top/bottom split button |
+| `@agent_tmux_split_tb_label_narrow` | `─` | the same button at phone widths, where columns are scarce |
+| `@agent_tmux_buttons_gap` | `3` | columns between the buttons and your theme's first tab |
+| `@agent_tmux_buttons_width` | `60` | below this many columns the buttons lose their gaps |
+| `@agent_tmux_window_border` | `on` | `off` leaves the current tab as your theme drew it |
+| `@agent_tmux_window_border_left` / `_right` | `▏` / `▕` | the border glyphs |
+| `@agent_tmux_pane_highlight` | `on` | `off` leaves pane borders to your theme |
+| `@agent_tmux_pane_border_lines` | `heavy` | `single` \| `double` \| `heavy` \| `simple` \| `number` |
 
 Colors, all Catppuccin Mocha by default:
 
 | option | default | what |
 |--------|---------|------|
-| `@agent_tmux_accent` | `#cba6f7` | current-session pill |
+| `@agent_tmux_accent` | `#cba6f7` | current-session pill, current-window border |
 | `@agent_tmux_accent_fg` | `#11111b` | text on filled pills |
 | `@agent_tmux_pill_bg` | `#313244` | other-session pills |
 | `@agent_tmux_pill_fg` | `#a6adc8` | text on dim pills |
 | `@agent_tmux_band` | `#181825` | row 1 background |
-| `@agent_tmux_button_bg` / `_fg` | `#313244` / `#cba6f7` | the picker button |
+| `@agent_tmux_button_bg` / `_fg` | `#313244` / `#cba6f7` | every button, both rows |
 | `@agent_tmux_state_blocked` | `#f38ba8` | tab color: blocked |
 | `@agent_tmux_state_waiting` | `#f9e2af` | tab color: your move |
 | `@agent_tmux_state_working` | `#89b4fa` | tab color: busy |
@@ -248,6 +295,25 @@ Colors, all Catppuccin Mocha by default:
 
 The rail lives on `status-format[1]`, which themes do not write — so it cannot
 collide, and load order does not matter for it.
+
+Row 0 is touched in exactly two places, both additive and both reversible:
+
+- `status-format[0]` gets **one reference prepended**, `#{E:@agent_tmux_buttons}`.
+  Every other byte — your theme's tabs, its modules, its separators — is
+  untouched, and setting `@agent_tmux_window_buttons off` takes the reference
+  back out again.
+- `window-status-current-format` is **wrapped**, not replaced: the theme's own
+  value stays in the middle, between the two border halves.
+
+Both are guarded so `prefix` + `I` and `prefix` + `R` cannot stack a second
+copy. Load the plugin **after** your theme, since these read what the theme
+wrote; a theme that sets `status-format[0]` itself (catppuccin and friends do
+not) would need to be loaded first.
+
+The buttons are a plain format, not a `#()` job — row 0 redraws far more often
+than row 1, and three static pills are not worth a fork per redraw. That is also
+what makes the narrow layout per-client: `#{client_width}` is evaluated for the
+client being drawn, so the phone gets the compact group and the laptop does not.
 
 **It does not touch `status-interval`.** The row is repainted by hooks on
 `session-created`/`-closed`/`-renamed`, `client-session-changed` and
@@ -262,21 +328,34 @@ your config will not stack duplicates.
 The tab colors set `window-status-format` **per window**, while a theme sets it
 globally. Your theme's value is never overwritten; clearing a pane's state
 removes the per-window override and the theme shows through again, verbatim.
-There is a regression test for exactly this.
+There is a regression test for exactly this. Those per-window repaints carry the
+border halves through as well, so the window you are on keeps its border while
+its agent is working — the case where it matters most.
 
 ## Tests
 
 ```sh
-bash tests/tmux-sessions.test.sh   # the rail, narrow mode, the menu
+bash tests/tmux-sessions.test.sh   # the rail, narrow mode, the menu, the buttons
 bash tests/agent-status.test.sh    # state aggregation and theming
+bash tests/window-buttons.test.sh  # row 0: the buttons, the border, composition
 tests/vhs/run.sh                   # renders tmux, samples the pixels
 tests/cleanroom.sh                 # fresh containers, five tmux versions
 ```
 
-The first two use a throwaway `tmux -L <socket>` server and never touch your live
-sessions. The VHS suite renders an actual session against a self-contained config
-and asserts the *rendered pixels*, which is the only layer that can catch a
-status-format regression. It needs `vhs`, `ttyd`, `ffmpeg` and ImageMagick.
+The first three use a throwaway `tmux -L <socket>` server and never touch your
+live sessions. The VHS suite renders an actual session against a self-contained
+config and asserts the *rendered pixels*, which is the only layer that can catch
+a status-format regression. It needs `vhs`, `ttyd`, `ffmpeg` and ImageMagick
+(6 or 7 — `convert` or `magick`).
+
+Three of its scenarios cover row 0: `row0-buttons` walks a laptop-width client
+along three windows and asserts the border moves with the selection while the
+three pills stay put, `row0-mobile` does the same at 55 columns and asserts the
+buttons merge but never disappear, and `row0-click` **actually clicks them** —
+VHS has no mouse command, but a status-bar click is only an SGR escape sequence
+on the terminal's input, and VHS can type one. That last scenario is the only
+layer that proves tmux *reports* our ranges rather than merely that we emit
+them; it ends with two windows and a window split both ways.
 
 `cleanroom.sh` installs the plugin in throwaway containers — fresh user, empty
 `$HOME`, nothing present but tmux/git/fzf — across Ubuntu 22.04/24.04 and Debian
@@ -298,6 +377,13 @@ always has their own dotfiles in it, so it cannot tell you what a stranger sees.
   width and truncates the visible text, so the `!` and `*` marks do that job.
 - Session-name width is counted in characters, not display columns, so a name
   with CJK or emoji makes the rail slightly wider than the fit test believes.
+- The row-0 buttons cost 17 columns (11 when narrow, where the rule glyph
+  shrinks to one column and the gaps go). On a ~40-column phone that
+  is roughly one window tab — and with a theme whose right-hand modules do not
+  shrink (catppuccin's do not), row 0 there can end up showing the buttons and
+  no tabs at all. tmux keeps the *current* window's tab visible as soon as there
+  is room for one, so the border is what you see first. `@agent_tmux_window_buttons off`
+  buys the columns back.
 
 ## License
 

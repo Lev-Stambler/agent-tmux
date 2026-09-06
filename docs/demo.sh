@@ -128,6 +128,90 @@ colour_gif aggregate \
    bash $SS $S $A working </dev/null
    bash $SS $S $B working </dev/null; sleep 2.5' 14
 
+# ------------------------------------------------- row 0: buttons + border --
+# Clicks the three row-0 buttons for real. VHS has no mouse command, but a
+# status-bar click is just an SGR escape sequence on the terminal's input, and
+# VHS can type one: ESC [ < 0 ; <col> ; <row> M, then the same with m to release.
+#
+# The row to aim at cannot be assumed -- VHS sizes the terminal in PIXELS, so how
+# many rows 190px of 15pt text comes to is ttyd's business. Ask tmux once, with a
+# throwaway render, and then write the real tape.
+probe_rows(){ # <width> <height> <fontsize> -> total rows in that terminal
+  local w="$1" h="$2" fs="$3" f="$OUT/.rows"
+  rm -f "$f"
+  cat > "$OUT/.p.run.sh" <<CONF
+#!/usr/bin/env bash
+S=atxprobe
+tmux -L \$S kill-server 2>/dev/null
+tmux -L \$S -f "$OUT/.demo.conf" new-session -d -s p -x 100 -y 16
+( sleep 2; tmux -L \$S display-message -p '#{client_height}' > $f ) &
+exec tmux -L \$S attach -t p
+CONF
+  cat > "$OUT/.p.tape" <<CONF
+Output "$OUT/.probe.gif"
+Set Shell "bash"
+Set Width $w
+Set Height $h
+Set FontSize $fs
+Set Padding 0
+Set Margin 0
+Sleep 300ms
+Type "bash $OUT/.p.run.sh"
+Enter
+Sleep 4s
+CONF
+  vhs "$OUT/.p.tape" >/dev/null 2>&1
+  tmux -L atxprobe kill-server 2>/dev/null || true
+  # #{client_height} is the whole terminal, status rows included -- so this is
+  # the row count, and the two status lines are the last two of it.
+  cat "$f" 2>/dev/null || echo 12
+}
+
+W=900; H=230; FS=15
+ROWS="$(probe_rows $W $H $FS)"
+R0=$(( ROWS - 1 ))            # 1-based terminal row of status line 0
+cat > "$OUT/.w.run.sh" <<CONF
+#!/usr/bin/env bash
+S=atxwin
+B='bash --rcfile $OUT/.demo.rc -i'
+tmux -L \$S kill-server 2>/dev/null
+tmux -L \$S -f "$OUT/.demo.conf" new-session -d -s api -n api -x 100 -y 16 "\$B"
+tmux -L \$S new-window -a -t api:1 -n build "\$B"   # -t api alone means "index 1", which is taken
+tmux -L \$S select-window -t api:1
+exec tmux -L \$S attach -t api
+CONF
+chmod +x "$OUT/.w.run.sh"
+click(){ # <column> [pause] — press and release button 1 on row 0
+  printf 'Escape\nType "[<0;%s;%sM"\nEscape\nType "[<0;%s;%sm"\nSleep %s\n' \
+         "$1" "$R0" "$1" "$R0" "${2:-2s}"
+}
+{ cat <<CONF
+Output "$OUT/windows.gif"
+Set Shell "bash"
+Set Width $W
+Set Height $H
+Set FontSize $FS
+Set Padding 0
+Set Margin 0
+Set Theme "Catppuccin Mocha"
+Set Framerate 12
+Set TypingSpeed 5ms
+Sleep 300ms
+Hide
+Type "bash $OUT/.w.run.sh"
+Enter
+Sleep 3s
+Show
+Sleep 1500ms
+CONF
+  click 2 2500ms      # +  -> a third window, and the border moves to it
+  click 6 2500ms      # │  -> split left/right
+  click 10 3s         # ─  -> split top/bottom
+} > "$OUT/.w.tape"
+vhs "$OUT/.w.tape"
+tmux -L atxwin kill-server 2>/dev/null || true
+echo "wrote $OUT/windows.gif"
+
 # ------------------------------------------------------------------ mobile --
 # A phone-width terminal: the rail collapses to the hamburger, and prefix+m
 # opens the menu. Rendered NARROW on purpose -- the wide 900px GIFs scale down
@@ -172,4 +256,5 @@ tmux -L atxmobile kill-server 2>/dev/null || true
 echo "wrote $OUT/mobile.gif"
 
 [ -n "${KEEP:-}" ] || rm -f "$OUT/.demo.conf" "$OUT/.demo.run.sh" "$OUT/.demo.tape" "$OUT/.demo.rc" \
-      "$OUT/.c.run.sh" "$OUT/.c.tape" "$OUT/.m.run.sh" "$OUT/.m.tape"
+      "$OUT/.c.run.sh" "$OUT/.c.tape" "$OUT/.m.run.sh" "$OUT/.m.tape" \
+      "$OUT/.w.run.sh" "$OUT/.w.tape" "$OUT/.p.run.sh" "$OUT/.p.tape" "$OUT/.probe.gif" "$OUT/.rows"

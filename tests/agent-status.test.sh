@@ -138,6 +138,35 @@ run "$A" clear
 check "clear restores the theme verbatim" "$THEME" "$(tt display-message -p -t s '#{window-status-format}')"
 tt set-option -gu window-status-format
 
+echo "== 9a. an agent colour still leaves the ACTIVE pane distinguishable =="
+# Both borders in the state colour painted every split the same, so inside a
+# coloured window you could not see which pane you were in.
+run "$A" blocked
+check "active pane border carries the state" "fg=$RED" \
+  "$(tt show-window-options -v -t "$WIN" pane-active-border-style)"
+PB="$(tt show-window-options -v -t "$WIN" pane-border-style)"
+if [ "$PB" != "fg=$RED" ] && [ -n "$PB" ]; then ok "the other panes' borders stay dim ($PB)"
+else bad "inactive border not distinguishable: '$PB'"; fi
+run "$A" clear
+check "clear drops both overrides" "" \
+  "$(tt show-window-options -v -t "$WIN" pane-active-border-style 2>/dev/null)"
+
+echo "== 9b. the border around the current tab survives an agent colour =="
+# agent-status.sh repaints window-status-current-format per window. The border
+# the plugin wraps the current tab in is in that same option, so without the two
+# #{E:@agent_tmux_wb_*} references it would vanish from exactly the window whose
+# agent is working -- the one you are most likely to be looking at.
+tt set-option -g @agent_tmux_wb_l '#[fg=#cba6f7]▏'
+tt set-option -g @agent_tmux_wb_r '#[fg=#cba6f7]▕#[default]'
+run "$A" blocked
+CUR="$(tt show-window-options -v -t "$WIN" window-status-current-format)"
+case "$CUR" in *'#{E:@agent_tmux_wb_l}'*'#{E:@agent_tmux_wb_r}'*) ok "border kept around the coloured tab";;
+                *) bad "border dropped: '$CUR'";; esac
+case "$(tt display-message -p -t s '#{E:#{window-status-current-format}}')" in
+  *'▏'*) ok "and it really renders" ;; *) bad "border did not render";; esac
+run "$A" clear
+tt set-option -gu @agent_tmux_wb_l; tt set-option -gu @agent_tmux_wb_r
+
 echo "== 10. palette is themable via @agent_tmux_* =="
 reset
 tt set-option -g @agent_tmux_state_blocked '#ff0000'

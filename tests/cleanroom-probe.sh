@@ -37,6 +37,17 @@ echo "== 2. the two rows actually exist =="
 chk "status is 2 rows" 2 "$(tmux -L $S show-options -gv status)"
 FMT="$(tmux -L $S show-options -gv 'status-format[1]')"
 case "$FMT" in *tmux-sessions*) ok "row 1 is owned by the plugin";; *) bad "row 1 not set: '$FMT'";; esac
+F0="$(tmux -L $S show-options -gv 'status-format[0]')"
+case "$F0" in *'#{E:@agent_tmux_buttons}'*) ok "row 0 has the window buttons";; *) bad "no buttons on row 0: '$F0'";; esac
+case "$F0" in *'#{W:'*) ok "row 0 still draws the window list";; *) bad "row 0 lost the tabs: '$F0'";; esac
+WSC="$(tmux -L $S show-options -gv window-status-current-format)"
+case "$WSC" in *'@agent_tmux_wb_l'*) ok "the current tab is bordered";; *) bad "no border: '$WSC'";; esac
+chk "the active pane is highlighted" "fg=#cba6f7" "$(tmux -L $S show-options -gv pane-active-border-style)"
+chk "other pane borders go dim"       "fg=#313244" "$(tmux -L $S show-options -gv pane-border-style)"
+BTN="$(tmux -L $S display-message -p '#{E:@agent_tmux_buttons}')"
+for r in agent_newwin agent_split_lr agent_split_tb; do
+  case "$BTN" in *"range=user|$r"*) ok "$r is clickable";; *) bad "$r missing from row 0";; esac
+done
 
 echo "== 3. row 1 renders (no theme installed at all) =="
 ROW="$(TMUX="$(tmux -L $S display-message -p '#{socket_path},0,0')" \
@@ -93,6 +104,10 @@ echo "== 6. reload is idempotent (prefix+I / prefix+R) =="
 for i in 1 2 3; do TMUX="$(tmux -L $S display-message -p '#{socket_path},0,0')" \
   bash "$HOME/.tmux/plugins/agent-tmux/agent-tmux.tmux" >/dev/null 2>&1; done
 chk "hooks not stacked" 5 "$(tmux -L $S show-hooks -g | grep -c 'tmux-sessions refresh')"
+chk "row 0 not double-buttoned" 1 \
+  "$(tmux -L $S show-options -gv 'status-format[0]' | grep -o '#{E:@agent_tmux_buttons}' | wc -l)"
+chk "the tab is not double-bordered" 1 \
+  "$(tmux -L $S show-options -gv window-status-current-format | grep -o '@agent_tmux_wb_l' | wc -l)"
 
 echo "== 7. the rail follows session lifecycle =="
 tmux -L $S new-session -d -s zzz
@@ -124,6 +139,7 @@ echo "== 10. the shipped test suites run on a clean box =="
 cd "$HOME/.tmux/plugins/agent-tmux"
 bash tests/tmux-sessions.test.sh >/tmp/t1.log 2>&1 && ok "rail suite green" || { bad "rail suite red"; tail -12 /tmp/t1.log; }
 bash tests/agent-status.test.sh  >/tmp/t2.log 2>&1 && ok "state suite green" || { bad "state suite red"; tail -12 /tmp/t2.log; }
+bash tests/window-buttons.test.sh >/tmp/t3.log 2>&1 && ok "row-0 suite green" || { bad "row-0 suite red"; tail -12 /tmp/t3.log; }
 
 echo
 echo "--------------------------------------"

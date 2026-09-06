@@ -17,16 +17,30 @@ OUT="$HERE/out"; mkdir -p "$OUT"
 SS="$HERE/set-state.sh"
 SAMP="$HERE/sample-status-color.sh"
 ROOT="$(cd "$HERE/../.." && pwd)"
+# Build a config for one scenario: demo.conf with the plugin path filled in and
+# any per-scenario options spliced in at the marker — which sits BEFORE the
+# `run` line on purpose, since options like the palette are read at load time.
+mkconf(){ # <name> [extra conf lines] -> path
+  local out="$OUT/$1.conf" extra="${2:-}"
+  : > "$out"
+  while IFS= read -r line; do
+    case "$line" in
+      *'#{@agent_tmux_extra}'*) [ -n "$extra" ] && printf '%s\n' "$extra" >> "$out" ;;
+      *) printf '%s\n' "${line//'#{@agent_tmux_selfdir}'/$ROOT}" >> "$out" ;;
+    esac
+  done < "$HERE/demo.conf"
+  printf '%s' "$out"
+}
 # Self-contained by default; override to render against your own config.
-CFG="${AGENT_TMUX_VHS_CONF:-$OUT/demo.conf}"
-sed "s|#{@agent_tmux_selfdir}|$ROOT|g" "$HERE/demo.conf" > "$OUT/demo.conf"
+CFG="${AGENT_TMUX_VHS_CONF:-$(mkconf demo)}"
 # Columns before session pill 1 on row 1: 1 leading space + the " + " picker
 # button (3) + 1 gap. sample-session-pill.sh maps x-position to pill index.
 export PILL_LEAD="${PILL_LEAD:-5}"
 
 command -v vhs    >/dev/null || { echo "FATAL: vhs not found";              exit 2; }
 command -v ffmpeg >/dev/null || { echo "FATAL: ffmpeg not found";           exit 2; }
-command -v magick >/dev/null || { echo "FATAL: ImageMagick(magick) missing"; exit 2; }
+command -v magick >/dev/null || command -v convert >/dev/null \
+  || { echo "FATAL: ImageMagick missing (need 'magick' or 'convert')"; exit 2; }
 
 PASS=0; FAIL=0
 grn(){ printf '\033[32m%s\033[0m' "$1"; }; rdn(){ printf '\033[31m%s\033[0m' "$1"; }
@@ -43,31 +57,46 @@ observed_seq(){ # <gif> -> adjacent-deduped sample list, none/other dropped
   rm -rf "$tmp"; echo "${out# }"
 }
 is_subseq(){ # <expected csv> <observed list> : expected is in-order subsequence?
+  # Each expected token is matched as a GLOB, so a scenario can assert the shape
+  # of a sample ("b1c[0-9]*" = buttons merged and SOME border present) where the
+  # exact position is the theme's business, not ours.
   local exp=(${1//,/ }) obs=($2) i=0 o
-  for o in "${obs[@]}"; do [ "$i" -lt "${#exp[@]}" ] && [ "$o" = "${exp[$i]}" ] && i=$((i+1)); done
+  for o in "${obs[@]}"; do
+    [ "$i" -lt "${#exp[@]}" ] && case "$o" in ${exp[$i]}) i=$((i+1)) ;; esac
+  done
   [ "$i" -eq "${#exp[@]}" ]
 }
+saw(){ # <token glob> <observed list> : did this sample ever appear?
+  local o; for o in $2; do case "$o" in $1) return 0 ;; esac; done; return 1
+}
 
-run_scenario(){ # <name> <expected csv> <tape> <socket> <timeout-s> [sampler]
-  local name="$1" exp="$2" tape="$3" sock="$4" to="$5"
+render(){ # <name> <tape> <socket> <timeout-s>: 1 (reported) if no GIF came out
+  rm -f "$OUT/$1.gif"
+  timeout "$4" vhs "$2" >"$OUT/$1.log" 2>&1
+  tmux -L "$3" kill-server 2>/dev/null
+  # -s, not -f: an ffmpeg failure inside vhs leaves a 0-byte GIF behind, and
+  # sampling that reads as "the plugin drew nothing".
+  [ -s "$OUT/$1.gif" ] && return 0
+  echo "  $(rdn FAIL) no GIF — see $OUT/$1.log"; FAIL=$((FAIL+1)); return 1
+}
+
+run_scenario(){ # <name> <expected csv> <tape> <socket> <timeout-s> [sampler] [forbidden glob]
+  local name="$1" exp="$2" tape="$3" sock="$4" to="$5" forbid="${7:-}"
   SAMPLER="${6:-$SAMP}"
   printf '== %-12s ==  expect: %s\n' "$name" "$exp"
-  rm -f "$OUT/$name.gif"
-  timeout "$to" vhs "$tape" >"$OUT/$name.log" 2>&1
-  tmux -L "$sock" kill-server 2>/dev/null
-  if [ ! -f "$OUT/$name.gif" ]; then
-    echo "  $(rdn FAIL) no GIF — see $OUT/$name.log"; FAIL=$((FAIL+1)); return
-  fi
+  render "$name" "$tape" "$sock" "$to" || return
   local obs; obs="$(observed_seq "$OUT/$name.gif")"
   printf '  observed: %s\n' "${obs:-<none>}"
-  if is_subseq "$exp" "$obs"; then echo "  $(grn PASS)  $OUT/$name.gif"; PASS=$((PASS+1))
+  if [ -n "$forbid" ] && saw "$forbid" "$obs"; then
+    echo "  $(rdn FAIL)  saw [$forbid], which must never happen"; FAIL=$((FAIL+1))
+  elif is_subseq "$exp" "$obs"; then echo "  $(grn PASS)  $OUT/$name.gif"; PASS=$((PASS+1))
   else echo "  $(rdn FAIL)  [$exp] not a subsequence of observed"; FAIL=$((FAIL+1)); fi
 }
 
 tape_header(){ cat <<EOF
 Output "$1"
 Set Shell "bash"
-Set Width 1100
+Set Width ${2:-1100}
 Set Height 360
 Set FontSize 16
 Set Padding 0
@@ -157,11 +186,137 @@ EOF
   echo "$tape"
 }
 
+# Row 0: the window buttons, and the border that has to follow the selected
+# window. Both colours are overridden to something the theme never uses, because
+# catppuccin already paints the current tab mauve — our own default accent — and
+# a sampler that cannot tell the two apart would pass with the border missing.
+ROW0_CONF='set -g @agent_tmux_accent "#ff00ff"
+set -g @agent_tmux_button_bg "#0000ff"
+set -g @agent_tmux_button_label off'
+
+# On a laptop: three separate pills (b3), and the border walking right along the
+# tabs as windows 1 -> 2 -> 3 are selected. Position is in sixteenths of the
+# screen, and the expectation is RANGES, not exact buckets: which frame ffmpeg
+# lands on inside a three-second hold moves a sample by one. The ranges do not
+# overlap, so the claim they encode is still "the border tracks the selection".
+ROW0_WIDE="${ROW0_WIDE:-b3c[34],b3c[56],b3c[78]}"
+# On a phone the tab list is a scrolling window of ONE tab -- tmux keeps the
+# current window visible and marks the rest with < and > -- so the border does
+# not travel anywhere. What has to hold is that the buttons are still there, in
+# their merged form, and that the tab you are on is still bordered. Position is
+# the theme's business, so it is matched as a glob.
+ROW0_MOBILE="${ROW0_MOBILE:-b1c[0-9]*}"
+
+# $1 name $2 sock $3 tape width px $4 columns. Three windows, and the client is
+# walked along them so the border has to move.
+scn_row0(){
+  local name="$1" sock="$2" wpx="$3" cols="$4"
+  local cfg sh tape
+  cfg="$(mkconf "$name" "$ROW0_CONF")"
+  sh="$OUT/$name.run.sh"; tape="$OUT/$name.tape"
+  cat >"$sh" <<EOF
+#!/usr/bin/env bash
+S=$sock
+tmux -L \$S kill-server 2>/dev/null
+tmux -L \$S -f $cfg new-session -d -s s -x $cols -y 22
+tmux -L \$S new-window -t s; tmux -L \$S new-window -t s
+tmux -L \$S select-window -t s:1
+(
+  sleep 3
+  tmux -L \$S select-window -t s:2; sleep 3
+  tmux -L \$S select-window -t s:3; sleep 3
+) &
+exec tmux -L \$S attach -t s
+EOF
+  chmod +x "$sh"
+  { tape_header "$OUT/$name.gif" "$wpx"
+    printf 'Type "bash %s"\nEnter\nSleep 11s\nScreenshot "%s"\n' "$sh" "$OUT/$name.png"
+  } >"$tape"
+  echo "$tape"
+}
+
+# Clicking, for real. VHS has no mouse command, but a status-bar click is just
+# an SGR escape sequence arriving on the terminal's input -- which VHS CAN type.
+# The bar goes to the top for this one so the row to aim at is row 1 whatever
+# ttyd's font metrics make of the window size; the three buttons are then the
+# leftmost columns of row 0 (" + " " │ " " ─ " => columns 2, 6 and 10).
+#
+# The assertion is tmux's own state, not pixels: this scenario exists to prove
+# that a real click reaches the routing at all -- emitting a #[range=user|...]
+# and having tmux REPORT it are different things (and below tmux 3.4, the second
+# one does not happen).
+click_at(){ printf 'Escape\nType "[<0;%s;1M"\nEscape\nType "[<0;%s;1m"\nSleep 2s\n' "$1" "$1"; }
+scn_click(){ # <state file>
+  local name=row0-click sock=r0c cfg sh tape
+  cfg="$(mkconf "$name" "$ROW0_CONF"$'\nset -g status-position top')"
+  sh="$OUT/$name.run.sh"; tape="$OUT/$name.tape"
+  cat >"$sh" <<EOF
+#!/usr/bin/env bash
+S=$sock
+tmux -L \$S kill-server 2>/dev/null
+tmux -L \$S -f $cfg new-session -d -s s -x 136 -y 22
+(
+  # Dumped from inside the session while the tape is still recording -- the
+  # server is killed the moment vhs exits.
+  sleep 11
+  tmux -L \$S list-windows -t s -F 'W #{window_index}' > $1
+  tmux -L \$S list-panes -a -F 'P #{window_index} #{pane_left} #{pane_top}' >> $1
+) &
+exec tmux -L \$S attach -t s
+EOF
+  chmod +x "$sh"
+  { tape_header "$OUT/$name.gif"
+    printf 'Set TypingSpeed 5ms\nType "bash %s"\nEnter\nSleep 3s\n' "$sh"
+    click_at 2; click_at 6; click_at 10
+    printf 'Screenshot "%s"\nSleep 5s\n' "$OUT/$name.png"
+  } >"$tape"
+  echo "$tape"
+}
+run_click(){
+  local state="$OUT/row0-click.state" name=row0-click
+  printf '== %-12s ==  expect: + opens a window, │ and ─ split it\n' "$name"
+  rm -f "$state"
+  render "$name" "$(scn_click "$state")" r0c 240 || return
+  if [ ! -s "$state" ]; then
+    echo "  $(rdn FAIL)  the session never reported its state — see $OUT/$name.log"
+    FAIL=$((FAIL+1)); return
+  fi
+  local wins panes lefts tops
+  wins="$(grep -c '^W ' "$state")"
+  panes="$(grep -c '^P 2 ' "$state")"
+  lefts="$(awk '$1=="P" && $2==2 {print $3}' "$state" | sort -u | wc -l)"
+  tops="$(awk '$1=="P" && $2==2 {print $4}' "$state" | sort -u | wc -l)"
+  # ...and the pane you land in has to be visible among them. The screenshot is
+  # taken after the last split, so the accent-coloured frame is either drawn in
+  # the content area or it is not.
+  local hl; hl="$(bash "$HERE/sample-pane-border.sh" "$OUT/$name.png")"
+  printf '  observed: %s windows, %s panes in window 2 (%s columns, %s rows), active pane %s\n' \
+    "$wins" "$panes" "$lefts" "$tops" "$hl"
+  if [ "$wins" = 2 ] && [ "$panes" = 3 ] && [ "$lefts" = 2 ] && [ "$tops" = 2 ] \
+     && case "$hl" in hl[0-9]*) [ "${hl#hl}" -ge 100 ] ;; *) false ;; esac; then
+    echo "  $(grn PASS)  $OUT/$name.gif"; PASS=$((PASS+1))
+  else
+    echo "  $(rdn FAIL)  want 2 windows, 3 panes split both ways, active pane outlined"
+    FAIL=$((FAIL+1))
+  fi
+}
+
 do_det(){
   run_scenario single     "blue,yellow,red,green" "$(scn_single)"     sgl 180
   run_scenario aggregate  "blue,yellow,red,blue"  "$(scn_aggregate)"  agg 180
   run_scenario manual-ack "blue,green"            "$(scn_manualack)"  ack 150
   run_scenario sessions   "2,1,3"                 "$(scn_sessions)"   ses 180 "$HERE/sample-session-pill.sh"
+  do_row0
+}
+# A laptop and a phone. The phone case is the one that matters: row 0 is far too
+# narrow for the tabs there, so the buttons have to survive at the left edge.
+do_row0(){
+  # "b?c-" is the buttons rendering with the current tab NOT bordered: the exact
+  # regression this pair exists to catch, and a subsequence check alone cannot
+  # express "never".
+  run_scenario row0-buttons "$ROW0_WIDE"   "$(scn_row0 row0-buttons r0w 1100 136)" r0w 180 "$HERE/sample-row0.sh" 'b?c-'
+  run_scenario row0-mobile  "$ROW0_MOBILE" "$(scn_row0 row0-mobile  r0m  550  55)"  r0m 180 "$HERE/sample-row0.sh" 'b?c-'
+  run_click
 }
 # Real-agent end-to-end. NOTE: claude does not enter its TUI under vhs/ttyd (it
 # prints the trust prompt and returns to the shell), so the real-claude scenario is
@@ -181,6 +336,10 @@ case "${1:-deterministic}" in
   aggregate)   run_scenario aggregate  "blue,yellow,red,blue"  "$(scn_aggregate)" agg 180 ;;
   manual-ack)  run_scenario manual-ack "blue,green"            "$(scn_manualack)" ack 150 ;;
   sessions)    run_scenario sessions   "2,1,3"                 "$(scn_sessions)"  ses 180 "$HERE/sample-session-pill.sh" ;;
+  row0)        do_row0 ;;
+  row0-buttons) run_scenario row0-buttons "$ROW0_WIDE"   "$(scn_row0 row0-buttons r0w 1100 136)" r0w 180 "$HERE/sample-row0.sh" 'b?c-' ;;
+  row0-mobile)  run_scenario row0-mobile  "$ROW0_MOBILE" "$(scn_row0 row0-mobile  r0m  550  55)"  r0m 180 "$HERE/sample-row0.sh" 'b?c-' ;;
+  row0-click)   run_click ;;
   real-claude) do_real_one=1; run_scenario real-claude "blue,yellow" "$(real real-claude rc 'claude --dangerously-skip-permissions' 'say hi in one word' 22)" rc 260 ;;
   real-codex)  run_scenario real-codex "blue,yellow" "$(real real-codex rx 'codex -c model_reasoning_effort=low --dangerously-bypass-approvals-and-sandbox' 'say hi in one word' 22)" rx 260 ;;
   *) echo "unknown scenario: $1"; exit 2 ;;

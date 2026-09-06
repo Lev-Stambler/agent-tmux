@@ -9,9 +9,10 @@
 # and ffmpeg frames are RGBA, so we match the first 3 channels within a distance.
 #
 #   Usage: sample-status-color.sh <frame.png> [crop_geometry]
+IM="$(command -v magick || command -v convert)"   # ImageMagick 7 or 6
 img="$1"; crop="${2:-48%x9%+0+0}"
-[ -f "$img" ] || { echo none; exit 0; }
-magick "$img" -gravity SouthWest -crop "$crop" +repage -depth 8 \
+{ [ -f "$img" ] && [ -n "$IM" ]; } || { echo none; exit 0; }
+"$IM" "$img" -gravity SouthWest -crop "$crop" +repage -depth 8 \
   -format '%c' histogram:info:- 2>/dev/null | python3 -c '
 import sys, re
 acc  = {"red":(243,139,168), "yellow":(249,226,175), "blue":(137,180,250), "green":(166,227,161)}

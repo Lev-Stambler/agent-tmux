@@ -16,18 +16,23 @@
 #                     phone attached to the same session at the same time each
 #                     get the row that fits them. Omitted => never collapse.
 #   menu CLIENT       open the hamburger menu on CLIENT: panes whose agent needs
-#                     you, then every session, then the project picker.
+#                     you, every session, then the window actions and the
+#                     project picker.
 #   menu-args CLIENT  print the argv `menu` would hand display-menu, one per
 #                     line. A menu is a client-side overlay that capture-pane
 #                     cannot see, so this is how the contents get tested.
 #   jump N [client]   switch <client> (default: current client) to the Nth
 #                     session, numbering sessions alphabetically by name
 #                     (tmux's native list-sessions order — same as prefix+o).
+#   newwin [client]   open a window next to the one <client> is on, in the same
+#                     directory. Row 0's "+" button.
+#   split lr|tb [client]
+#                     split <client>'s pane side by side (lr) or stacked (tb),
+#                     in the same directory. Row 0's "│" and "─" buttons.
 #   click RANGE [client]
 #                     MouseDown1Status handler: jumps when RANGE is a
-#                     session_N user range, no-op for anything else. The
-#                     picker range is handled by the key binding, not here —
-#                     display-popup needs a client context only a binding has.
+#                     session_N user range, runs the window action for an
+#                     agent_* range (row 0's buttons), no-op for anything else.
 #
 # Colors and the button come from @agent_tmux_* options (see agent-tmux.tmux);
 # the defaults below are Catppuccin Mocha so it looks right out of the box.
@@ -46,7 +51,8 @@ MENU_LABEL='☰'       # hamburger glyph shown instead of the rail when narrow
 NARROW=''            # force a breakpoint; empty => collapse only when it doesn't fit
 S_BLOCKED='#f38ba8'  # badge colour: a pane is blocked
 S_WAITING='#f9e2af'  # badge colour: a pane finished its turn
-MENU_MAX=12          # hard cap on menu items; 0 = only the client-height cap
+MENU_MAX=15          # hard cap on menu items; 0 = only the client-height cap
+                     # (12 sessions + the 3 window actions the tail always adds)
 
 load_opts(){
   local opts
@@ -79,6 +85,16 @@ EOF
 
 sessions(){ tmux list-sessions -F '#{session_name}' 2>/dev/null; }
 
+# What CLIENT is looking at. Everything row 0 does (new window, split) has to
+# happen where the person who tapped is, and a backgrounded run-shell carries no
+# client of its own -- so the client is passed in explicitly and resolved here.
+# Empty when there is no such client: the callers then fall back to tmux's own
+# current target rather than doing nothing.
+client_fmt(){ # <client> <format>
+  local c="${1:-}"
+  tmux display-message ${c:+-c "$c"} -p "$2" 2>/dev/null
+}
+
 # Where does a status-bar range go? One implementation, two callers: `route`
 # prints the decision (so tests can assert it without opening a popup that
 # blocks forever waiting for a human), `click` acts on it.
@@ -86,6 +102,9 @@ route_of(){
   case "${1:-}" in
     menu)   printf 'menu'   ;;
     picker) printf 'picker' ;;
+    agent_newwin)   printf 'newwin'   ;;
+    agent_split_lr) printf 'split lr' ;;
+    agent_split_tb) printf 'split tb' ;;
     session_*)
       n="${1#session_}"
       case "$n" in ''|*[!0-9]*) printf 'none' ;; *) printf 'jump %s' "$n" ;; esac ;;
@@ -103,6 +122,32 @@ case "${1:-}" in
       tmux switch-client -c "$client" -t "=$target" 2>/dev/null
     else
       tmux switch-client -t "=$target" 2>/dev/null
+    fi
+    exit 0
+    ;;
+  newwin)
+    # New window, right after the one the client is on, in the same directory:
+    # tmux would otherwise open it at the SESSION's path, which after a day of
+    # work is rarely the project you are looking at.
+    # -t takes a WINDOW here -- handing new-window a pane id fails outright
+    # ("can't specify pane here"), silently, since this runs detached.
+    w="$(client_fmt "${2:-}" '#{window_id}')"
+    if [ -n "$w" ]; then
+      tmux new-window -a -t "$w" -c '#{pane_current_path}'
+    else
+      tmux new-window
+    fi
+    exit 0
+    ;;
+  split)
+    # lr -> panes side by side (tmux calls that -h), tb -> stacked (-v).
+    # Named for what you SEE, because the buttons are two glyphs with no words.
+    case "${2:-lr}" in lr) flag=-h ;; *) flag=-v ;; esac
+    p="$(client_fmt "${3:-}" '#{pane_id}')"
+    if [ -n "$p" ]; then
+      tmux split-window "$flag" -t "$p" -c '#{pane_current_path}'
+    else
+      tmux split-window "$flag"
     fi
     exit 0
     ;;
@@ -213,7 +258,8 @@ EOF
     q(){ local v="${1//\\/\\\\}"; v="${v//\"/\\\"}"; printf '"%s"' "$v"; }
     # Never a two-character key: tmux cannot parse "10" and silently renders the
     # item with NO shortcut, making it unreachable from the keyboard.
-    LETTERS='qwertyuiopzxcvbn'
+    # c, h and v are reserved for the window actions at the foot of the menu.
+    LETTERS='qwertyuiopzxbnm'
     mkey(){ case "$1" in [1-9]) printf '%s' "$1" ;; *) printf '%s' "${LETTERS:$(( $1 - 10 )):1}" ;; esac; }
 
     # A menu taller than the client draws NOTHING at all (max items is about
@@ -226,9 +272,14 @@ EOF
       cap=$(( h - 4 ))
     fi
     [ "$MENU_MAX" -gt 0 ] 2>/dev/null && [ "$cap" -gt "$MENU_MAX" ] && cap="$MENU_MAX"
-    [ "$cap" -lt 4 ] && cap=4
+    # 6, not 4: four of those slots are the always-present tail, and a menu that
+    # lists no sessions at all is not worth drawing.
+    [ "$cap" -lt 6 ] && cap=6
 
-    args=(); n=0
+    # The tail (new window / split right / split down / new project) is always
+    # there, so it is counted against the cap from the start -- otherwise a
+    # short client gets a menu taller than itself, which tmux draws as NOTHING.
+    args=(); n=4
     att="$(tmux list-panes -a -F '#{@agent_state}|#{session_name}|#{window_index}|#{pane_index}|#{pane_id}' 2>/dev/null \
            | grep -E '^(blocked|waiting)\|' | sort)"
     if [ -n "$att" ]; then
@@ -264,6 +315,13 @@ EOF
 $(sessions)
 EOF
     [ "$over" -eq 1 ] && args+=( "all sessions…" s "run-shell \"$SELF click picker '#{client_name}'\"" )
+    # The row-0 buttons, reachable without a mouse. Plenty of phone SSH clients
+    # never send mouse events at all, and below tmux 3.4 nothing on the status
+    # bar is clickable on any client -- so every button has a keyboard path.
+    args+=( '' \
+            "new window"  c "run-shell \"$SELF newwin '#{client_name}'\"" \
+            "split right" h "run-shell \"$SELF split lr '#{client_name}'\"" \
+            "split down"  v "run-shell \"$SELF split tb '#{client_name}'\"" )
     args+=( '' "new project…" p "run-shell \"$SELF click picker '#{client_name}'\"" )
 
     case "$mode" in
@@ -315,8 +373,10 @@ EOF
     # shellcheck disable=SC2046 -- route_of returns at most "jump N"
     set -- $(route_of "$range")
     case "${1:-none}" in
-      jump) exec "$0" jump "$2" "$client" ;;
-      menu) exec "$0" menu "$client" ;;
+      jump)   exec "$0" jump "$2" "$client" ;;
+      newwin) exec "$0" newwin "$client" ;;
+      split)  exec "$0" split "$2" "$client" ;;
+      menu)   exec "$0" menu "$client" ;;
       picker)
         # -c is what makes this work from run-shell, which carries no client of
         # its own; without it tmux picks its "best" client and the popup can open
@@ -332,6 +392,7 @@ EOF
     ;;
   *)
     echo "usage: tmux-sessions status [current] [width] | jump N [client] |" >&2
+    echo "       newwin [client] | split lr|tb [client] |" >&2
     echo "       click RANGE [client] [x] [y] | route RANGE | menu[-args] CLIENT" >&2
     exit 2
     ;;

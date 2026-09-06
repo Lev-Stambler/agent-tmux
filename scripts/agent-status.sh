@@ -197,7 +197,14 @@ else
 fi
 
 setw window-status-format "$fmt"
-setw window-status-current-format "$fmt_cur"
+# The border around the current tab is a WINDOW option too, so repainting the
+# tab here would drop it from exactly the window you are working in. The two
+# halves are option references: empty (and free) when the border is off.
+setw window-status-current-format "#{E:@agent_tmux_wb_l}$fmt_cur#{E:@agent_tmux_wb_r}"
+# The ACTIVE pane's frame carries the agent colour; the others stay dim. Both
+# in the state colour (what this used to do) painted every border in a split
+# window the same, which hid which pane you were actually in -- the one thing
+# the border is there to tell you.
 setw pane-active-border-style "fg=$col"
-setw pane-border-style "fg=$col"
+setw pane-border-style "fg=$surface"
 refresh

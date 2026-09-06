@@ -231,6 +231,47 @@ UNCAPPED="$(run menu-args "$CLIENT" 0 | grep -c 'run-shell')"
 case "$(run menu-args "$CLIENT" 8)" in *'all sessions…'*) ok "overflow entry offered";; *) bad "sessions silently dropped";; esac
 for n in s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12; do tt kill-session -t "$n" >/dev/null 2>&1; done
 
+echo "== 17. row-0 buttons: routing =="
+check "the + button routes to a new window"   newwin     "$(run route agent_newwin)"
+check "the │ button routes to a left/right split" "split lr" "$(run route agent_split_lr)"
+check "the ─ button routes to a top/bottom split" "split tb" "$(run route agent_split_tb)"
+check "an unknown agent_ range routes nowhere" none "$(run route agent_bogus)"
+
+echo "== 18. row-0 buttons: they act on the CLIENT's window, not tmux's idea of current =="
+run jump 4 "$CLIENT"                       # charlie
+check "client parked on charlie" charlie "$(csess)"
+W0="$(tt list-windows -t charlie | wc -l)"
+run click agent_newwin "$CLIENT"
+check "the + button opened a window in the client's session" "$((W0+1))" "$(tt list-windows -t charlie | wc -l)"
+# The new window must be the one the client is looking at — a window created
+# somewhere behind you is indistinguishable from nothing happening.
+NEWW="$(tt display-message -c "$CLIENT" -p '#{window_id}')"
+check "and switched the client to it" "$NEWW" "$(tt list-windows -t charlie -F '#{window_id}' | tail -1)"
+
+P0="$(tt list-panes -t "$NEWW" | wc -l)"
+run click agent_split_lr "$CLIENT"
+check "the │ button splits the pane" "$((P0+1))" "$(tt list-panes -t "$NEWW" | wc -l)"
+# left/right vs top/bottom is the whole point of having two buttons: assert the
+# geometry, not just that a pane appeared.
+LR="$(tt list-panes -t "$NEWW" -F '#{pane_left}' | sort -u | wc -l)"
+check "left/right: the panes sit side by side" 2 "$LR"
+run click agent_split_tb "$CLIENT"
+TB="$(tt list-panes -t "$NEWW" -F '#{pane_top}' | sort -u | wc -l)"
+check "top/bottom: the panes stack" 2 "$TB"
+tt kill-window -t "$NEWW" 2>/dev/null
+
+echo "== 19. row-0 buttons in the menu, for phones with no mouse =="
+J="$(run menu-args "$CLIENT" 0)"
+case "$J" in *'new window'*)   ok "menu offers a new window";;   *) bad "no new-window entry: $J";; esac
+case "$J" in *'split right'*)  ok "menu offers a left/right split";; *) bad "no split-right entry";; esac
+case "$J" in *'split down'*)   ok "menu offers a top/bottom split";; *) bad "no split-down entry";; esac
+case "$J" in *"newwin '#{client_name}'"*) ok "menu passes the client through";; *) bad "menu drops the client";; esac
+# The staged one-line command must still parse after the new entries.
+CMD="$(run menu-cmd "" 0)"
+check "menu-cmd is still a single line" 1 "$(printf '%s' "$CMD" | wc -l | awk '{print $1+1}')"
+QUOTES="$(printf '%s' "$CMD" | tr -cd '"' | wc -c)"
+check "quotes still balance" 0 "$(( QUOTES % 2 ))"
+
 echo
 echo "----------------------------------------"
 printf 'Total: %d passed, %d failed\n' "$PASS" "$FAIL"

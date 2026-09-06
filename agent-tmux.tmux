@@ -54,6 +54,29 @@ JUMP="$(opt @agent_tmux_jump_keys prefix)"     # prefix | chord | both | off
 COLORS="$(opt @agent_tmux_colors on)"          # on | off
 BUTTON="$(opt @agent_tmux_button_label '+')"
 
+# Row 0 (the theme's window tabs) additions. Palette defaults match
+# scripts/tmux-sessions so the two rows look like one bar.
+ACCENT="$(opt @agent_tmux_accent '#cba6f7')"
+BTN_BG="$(opt @agent_tmux_button_bg '#313244')"
+BTN_FG="$(opt @agent_tmux_button_fg '#cba6f7')"
+WBTNS="$(opt @agent_tmux_window_buttons on)"          # on | off
+NEW_LBL="$(opt @agent_tmux_new_window_label '+')"
+LR_LBL="$(opt @agent_tmux_split_lr_label '│')"
+# Four columns of rule, not one: a single ─ in a pill reads as a minus sign,
+# which is not what the button does. A phone gets the short one back -- measured,
+# at 55 columns the four-column rule pushes the current window's tab off row 0
+# entirely, and a tab you cannot see is worth more than a prettier glyph.
+TB_LBL="$(opt @agent_tmux_split_tb_label '────')"
+TB_LBL_N="$(opt @agent_tmux_split_tb_label_narrow '─')"
+BTN_NARROW="$(opt @agent_tmux_buttons_width 60)"      # below this: drop the gaps
+BTN_GAP="$(opt @agent_tmux_buttons_gap 3)"            # columns between the group and the tabs
+PILL_BG="$(opt @agent_tmux_pill_bg '#313244')"
+PANE_HL="$(opt @agent_tmux_pane_highlight on)"        # on | off
+PANE_LINES="$(opt @agent_tmux_pane_border_lines heavy)" # single|double|heavy|simple|number
+WBORDER="$(opt @agent_tmux_window_border on)"         # on | off
+WB_L="$(opt @agent_tmux_window_border_left '▏')"
+WB_R="$(opt @agent_tmux_window_border_right '▕')"
+
 SESSIONS="$DIR/scripts/tmux-sessions"
 STATUS="$DIR/scripts/agent-status.sh"
 
@@ -92,6 +115,108 @@ for h in session-created session-closed session-renamed client-session-changed c
   tmux show-hooks -g 2>/dev/null | grep -q "^$h\(\[[0-9]*\]\)\? .*tmux-sessions refresh" && continue
   tmux set-hook -ga "$h" "$refresh_cmd" 2>/dev/null
 done
+
+# ------------------------------------------------------- row 0: the buttons --
+# Row 0 stays the theme's row: we PREPEND one reference to it and leave every
+# other byte alone, so catppuccin & friends keep drawing the tabs.
+#
+# The group is a plain format, not a #() job: it never changes, and row 0 is
+# redrawn far more often than row 1 -- a fork per redraw for three static pills
+# would be pure waste. Being a format is also what makes it per-client: the
+# narrow branch is chosen from #{client_width}, which tmux evaluates for the
+# client it is drawing for, so a phone and a laptop on the same session each get
+# the group that fits.
+#
+# It has to be reached as #{E:...}: a bare #{@opt} is substituted verbatim,
+# NOT re-expanded, so the #{?...} inside it would reach the screen as text.
+btn(){ # <range> <label>
+  printf '#[range=user|%s]#[fg=%s,bg=%s,bold] %s #[norange]#[default]' \
+         "$1" "$BTN_FG" "$BTN_BG" "${2//#/##}"
+}
+# Whichever row the rail did NOT take is the theme's, and that is where the
+# buttons belong: @agent_tmux_row 0 moves the rail up, so the tabs move down.
+TABROW=0; [ "$ROW" = 0 ] && TABROW=1
+f0="$(tmux show-options -gv "status-format[$TABROW]" 2>/dev/null)"
+if [ "$WBTNS" != "off" ]; then
+  # Narrow keeps all three buttons at full size and drops only the gaps between
+  # them: on a phone the tap target is the thing you cannot afford to shrink.
+  # The gap after the group is not decoration: without it the last pill sits
+  # flush against the theme's first tab and the two read as one control.
+  case "$BTN_GAP" in ''|*[!0-9]*) BTN_GAP=3 ;; esac
+  gap="$(printf "%${BTN_GAP}s" '')"
+  tmux set-option -g @agent_tmux_buttons_wide \
+    "$(btn agent_newwin "$NEW_LBL") $(btn agent_split_lr "$LR_LBL") $(btn agent_split_tb "$TB_LBL")$gap"
+  # Narrow drops the gaps BETWEEN the pills and keeps one column before the
+  # tabs -- the tap targets stay full size, which is the part that matters on a
+  # phone, and the row gets 3 columns back.
+  tmux set-option -g @agent_tmux_buttons_narrow \
+    "$(btn agent_newwin "$NEW_LBL")$(btn agent_split_lr "$LR_LBL")$(btn agent_split_tb "$TB_LBL_N") "
+  # Both branches are bare option references on purpose: a #{?a,b,c} branch is
+  # split on the first top-level comma, and every pill is full of them.
+  #
+  # The breakpoint is the SIGN OF A SUBTRACTION, not #{<:}, because tmux's
+  # comparison operators are string comparisons: #{<:100,60} is TRUE ("1" sorts
+  # before "6"), so a 100-column laptop would have been served the phone row.
+  # #{e|-|:...} is real arithmetic, and a leading '-' means "narrower than".
+  tmux set-option -g @agent_tmux_buttons \
+    "#{?#{m:-*,#{e|-|:#{client_width},$BTN_NARROW}},#{E:@agent_tmux_buttons_narrow},#{E:@agent_tmux_buttons_wide}}"
+  case "$f0" in
+    *'#{E:@agent_tmux_buttons}'*) ;;   # already installed; TPM re-runs this file
+    *) tmux set-option -g "status-format[$TABROW]" "#{E:@agent_tmux_buttons}$f0" ;;
+  esac
+else
+  # Turned off after having been on: take the reference back out rather than
+  # leaving a dead one behind.
+  case "$f0" in
+    *'#{E:@agent_tmux_buttons}'*) tmux set-option -g "status-format[$TABROW]" "${f0//'#{E:@agent_tmux_buttons}'/}" ;;
+  esac
+  for o in @agent_tmux_buttons @agent_tmux_buttons_wide @agent_tmux_buttons_narrow; do
+    tmux set-option -gu "$o" 2>/dev/null
+  done
+fi
+
+# The current window's tab, in a border. Same trick: wrap whatever the theme
+# put in window-status-current-format instead of replacing it. The two halves
+# live in options so agent-status.sh can keep the border while it repaints a
+# tab in an agent's colour -- otherwise the border would vanish from exactly
+# the window you are working in.
+wsc="$(tmux show-options -gv window-status-current-format 2>/dev/null)"
+if [ "$WBORDER" != "off" ]; then
+  tmux set-option -g @agent_tmux_wb_l "#[fg=$ACCENT,bg=default,nobold]${WB_L//#/##}"
+  tmux set-option -g @agent_tmux_wb_r "#[fg=$ACCENT,bg=default,nobold]${WB_R//#/##}#[default]"
+  case "$wsc" in
+    *'@agent_tmux_wb_l'*) ;;
+    *) tmux set-option -g window-status-current-format \
+         "#{E:@agent_tmux_wb_l}$wsc#{E:@agent_tmux_wb_r}" ;;
+  esac
+else
+  case "$wsc" in
+    *'@agent_tmux_wb_l'*)
+      wsc="${wsc/'#{E:@agent_tmux_wb_l}'/}"
+      tmux set-option -g window-status-current-format "${wsc/'#{E:@agent_tmux_wb_r}'/}" ;;
+  esac
+  tmux set-option -gu @agent_tmux_wb_l 2>/dev/null
+  tmux set-option -gu @agent_tmux_wb_r 2>/dev/null
+fi
+
+# The pane you are in. tmux only ever draws a border BETWEEN panes, so this is
+# the one highlight that costs no columns: the active pane's frame takes the
+# accent, every other border goes dim, and heavy lines make the difference
+# readable at a glance across a wall of splits.
+#
+# Set globally, so agent-status.sh's per-window override (the agent's colour on
+# the active border) still wins where it applies, and unsetting that override
+# falls back to here rather than to the theme's default.
+if [ "$PANE_HL" != "off" ]; then
+  tmux set-option -g pane-active-border-style "fg=$ACCENT"
+  tmux set-option -g pane-border-style "fg=$PILL_BG"
+  case "$PANE_LINES" in
+    single|double|heavy|simple|number) tmux set-option -g pane-border-lines "$PANE_LINES" ;;
+  esac
+  # Arrows on top of the colour: a monochrome phone terminal, or anyone who
+  # cannot tell mauve from surface0, still gets to see which pane is live.
+  tmux set-option -g pane-border-indicators both
+fi
 
 # ------------------------------------------------------------------ pickers --
 tmux set-environment -g MUX_PATHS "$PATHS"
@@ -166,8 +291,12 @@ tmux set-option -g @agent_menu_cmd "$("$SESSIONS" menu-cmd "" 0 2>/dev/null)" 2>
 tmux set-option -g @agent_tmux_row0 'select-window -t ='
 tmux set-option -g @agent_tmux_clickcmd \
   "run-shell -b \"$SESSIONS click #{mouse_status_range} #{client_name}\""
+#
+# Row 0 now has our own ranges on it (agent_newwin, agent_split_lr,
+# agent_split_tb). They are matched by prefix, so the tabs keep their stock
+# behaviour and anything the theme emits is still none of our business.
 tmux bind-key -n MouseDown1Status run-shell -C \
-  "#{?#{!=:#{mouse_status_line},$ROW},#{@agent_tmux_row0},#{?#{==:#{mouse_status_range},menu},#{@agent_menu_cmd},#{@agent_tmux_clickcmd}}}"
+  "#{?#{!=:#{mouse_status_line},$ROW},#{?#{m:agent_*,#{mouse_status_range}},#{@agent_tmux_clickcmd},#{@agent_tmux_row0}},#{?#{==:#{mouse_status_range},menu},#{@agent_menu_cmd},#{@agent_tmux_clickcmd}}}"
 
 # ------------------------------------------------------------ agent  colors --
 if [ "$COLORS" != "off" ]; then
