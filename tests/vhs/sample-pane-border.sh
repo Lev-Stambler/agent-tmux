@@ -36,7 +36,10 @@ for line in sys.stdin:
 if not ys:
     print("none"); sys.exit()
 lo, hi = min(ys), max(ys)
-row = hi - lo + 1                                       # one text row
-n = sum(1 for y in mag if y < lo - row or y > hi + row)  # outside BOTH status rows
+row = hi - lo + 1                                       # the button row
+# Two rows of slack either way, not one: the second status row is not
+# necessarily the same pixel height as the first (measured 20px against 18px),
+# and the rail accent pill hanging into that extra 2px reads as a pane border.
+n = sum(1 for y in mag if y < lo - 2 * row or y > hi + 2 * row)
 print("hl%d" % n if n else "noborder")
 '

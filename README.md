@@ -42,6 +42,21 @@ space: tmux draws those borders anyway. In a window whose agent has a state, the
 state's colour takes over the active pane's border — the *active* one only, so a
 window full of splits still shows you where you are.
 
+**Explode a window into full-screen tabs (`prefix` + `e`).** A window holding
+four agents shows *one* blended tab colour, and each agent gets a quarter of the
+screen. Press `prefix` + `e` and every pane becomes its own full-screen window —
+`api`, `api·2`, `api·3` — so each agent gets a whole screen **and its own
+coloured tab**: the tab row turns into a board of every agent's state. Press it
+again, from any of those tabs, and the window comes back with its layout
+restored exactly.
+
+![prefix+e fanning one blended tab into three coloured ones, and back](docs/burst.gif)
+
+The colours follow the panes, which is the point: the tab a pane left stops
+claiming its state and the tab it joined picks it up. A zoomed pane comes back
+zoomed. Exact restore holds as long as you do not add or remove a pane while it
+is exploded; if you do, every pane still comes home, just in a `tiled` layout.
+
 **Agent tab colors (row 0).** The window tab shows the highest-priority state
 across *its panes*, so one split never hides another:
 
@@ -198,6 +213,7 @@ resolve a pane when exactly one Codex pane is running in that directory.
 | click `│` / `─` | split the current pane left/right or top/bottom |
 | `prefix` + `p` | project picker (fuzzy-find a directory) |
 | `prefix` + `o` | session picker (fuzzy-find a session, `ctrl-d` kills) |
+| `prefix` + `e` | explode the window into one full-screen tab per pane; press again to collapse |
 | `prefix` + `m` | open the ☰ menu (works with no mouse at all) |
 | tap `☰` | same menu, on a phone |
 | `prefix` + `g` | mark the current pane acked (green) |
@@ -261,8 +277,9 @@ You will also want `set -g extended-keys on`.
 | `@agent_tmux_status_interval` | *unset* | left alone on purpose — see below |
 | `@agent_tmux_picker` | bundled | command the picker button and `prefix`+`p` run |
 | `@agent_tmux_menu_key` | `m` | prefix key that opens the ☰ menu; `off` unbinds |
+| `@agent_tmux_burst_key` | `e` | prefix key that explodes/collapses the window; `off` unbinds |
 | `@agent_tmux_menu_label` | `☰` | narrow-mode glyph; `off` disables narrow mode entirely |
-| `@agent_tmux_menu_max` | `15` | item cap before an "all sessions…" entry (12 sessions + the window actions) |
+| `@agent_tmux_menu_max` | `16` | item cap before an "all sessions…" entry (12 sessions + the window actions) |
 | `@agent_tmux_narrow_width` | *unset* | also collapse below this width, on top of the fit test |
 | `@agent_tmux_window_buttons` | `on` | `off` leaves row 0 entirely to your theme |
 | `@agent_tmux_new_window_label` | `+` | glyph on the new-window button |
@@ -348,6 +365,11 @@ config and asserts the *rendered pixels*, which is the only layer that can catch
 a status-format regression. It needs `vhs`, `ttyd`, `ffmpeg` and ImageMagick
 (6 or 7 — `convert` or `magick`).
 
+`burst` drives the real `prefix` + `e` binding through a real client and checks
+tmux's own state — one window of three panes at the end, layout byte-identical
+to the one captured before the key was pressed — plus the pixels, since the pane
+divider has to vanish while exploded and come back after.
+
 Three of its scenarios cover row 0: `row0-buttons` walks a laptop-width client
 along three windows and asserts the border moves with the selection while the
 three pills stay put, `row0-mobile` does the same at 55 columns and asserts the
@@ -377,6 +399,16 @@ always has their own dotfiles in it, so it cannot tell you what a stranger sees.
   width and truncates the visible text, so the `!` and `*` marks do that job.
 - Session-name width is counted in characters, not display columns, so a name
   with CJK or emoji makes the rail slightly wider than the fit test believes.
+- Exploding restores the layout *exactly* only if the panes are the same ones
+  when you collapse. Add or close a pane while it is exploded and everything
+  still comes home, but in a `tiled` layout — tmux refuses a saved layout that
+  has fewer cells than the window has panes.
+- A pane that has been dragged into another session comes home too, and if it
+  was that session's only window, collapsing ends the session with it.
+- A window can only be split so many times, so collapsing a very deep burst into
+  a small window can run out of room. Nothing is orphaned when it does: the
+  group stays marked and says so, and pressing the key again finishes the job
+  once there is space.
 - The row-0 buttons cost 17 columns (11 when narrow, where the rule glyph
   shrinks to one column and the gaps go). On a ~40-column phone that
   is roughly one window tab — and with a theme whose right-hand modules do not

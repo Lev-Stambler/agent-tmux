@@ -212,6 +212,61 @@ vhs "$OUT/.w.tape"
 tmux -L atxwin kill-server 2>/dev/null || true
 echo "wrote $OUT/windows.gif"
 
+# ------------------------------------------------- explode / collapse (e) --
+# The payoff, in one GIF: a window of three agents shows ONE blended tab colour
+# (blocked wins), prefix+e fans it into three full-screen tabs each carrying its
+# own agent's colour, and prefix+e puts the layout back. Driven through the real
+# key binding, and through the real agent-status.sh entrypoint the hooks call.
+cat > "$OUT/.b.run.sh" <<CONF
+#!/usr/bin/env bash
+S=atxburst
+SS="$ROOT/tests/vhs/set-state.sh"
+B='bash --rcfile $OUT/.demo.rc -i'
+tmux -L \$S kill-server 2>/dev/null
+tmux -L \$S -f "$OUT/.demo.conf" new-session -d -s api -n agents -x 100 -y 16 "\$B"
+tmux -L \$S split-window -h -t api "\$B"
+tmux -L \$S split-window -v -t api "\$B"
+tmux -L \$S rename-window -t api:1 agents
+P1=\$(tmux -L \$S list-panes -t api -F '#{pane_id}' | sed -n 1p)
+P2=\$(tmux -L \$S list-panes -t api -F '#{pane_id}' | sed -n 2p)
+P3=\$(tmux -L \$S list-panes -t api -F '#{pane_id}' | sed -n 3p)
+bash \$SS \$S \$P1 working </dev/null
+bash \$SS \$S \$P2 blocked </dev/null
+bash \$SS \$S \$P3 waiting </dev/null
+tmux -L \$S select-pane -t \$P1
+exec tmux -L \$S attach -t api
+CONF
+chmod +x "$OUT/.b.run.sh"
+cat > "$OUT/.b.tape" <<CONF
+Output "$OUT/burst.gif"
+Set Shell "bash"
+Set Width 900
+Set Height 210
+Set FontSize 15
+Set Padding 0
+Set Margin 0
+Set Theme "Catppuccin Mocha"
+Set Framerate 12
+Sleep 300ms
+Hide
+Type "bash $OUT/.b.run.sh"
+Enter
+Sleep 3s
+Show
+Sleep 2500ms
+Ctrl+b
+Sleep 300ms
+Type "e"
+Sleep 4s
+Ctrl+b
+Sleep 300ms
+Type "e"
+Sleep 3s
+CONF
+vhs "$OUT/.b.tape"
+tmux -L atxburst kill-server 2>/dev/null || true
+echo "wrote $OUT/burst.gif"
+
 # ------------------------------------------------------------------ mobile --
 # A phone-width terminal: the rail collapses to the hamburger, and prefix+m
 # opens the menu. Rendered NARROW on purpose -- the wide 900px GIFs scale down
@@ -257,4 +312,5 @@ echo "wrote $OUT/mobile.gif"
 
 [ -n "${KEEP:-}" ] || rm -f "$OUT/.demo.conf" "$OUT/.demo.run.sh" "$OUT/.demo.tape" "$OUT/.demo.rc" \
       "$OUT/.c.run.sh" "$OUT/.c.tape" "$OUT/.m.run.sh" "$OUT/.m.tape" \
-      "$OUT/.w.run.sh" "$OUT/.w.tape" "$OUT/.p.run.sh" "$OUT/.p.tape" "$OUT/.probe.gif" "$OUT/.rows"
+      "$OUT/.w.run.sh" "$OUT/.w.tape" "$OUT/.p.run.sh" "$OUT/.p.tape" "$OUT/.probe.gif" "$OUT/.rows" \
+      "$OUT/.b.run.sh" "$OUT/.b.tape"

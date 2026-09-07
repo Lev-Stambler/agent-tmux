@@ -125,6 +125,9 @@ check "the other borders go dim"            'fg=#313244' "$(tt show-options -gv 
 check "borders are drawn heavy"             heavy        "$(tt show-options -gv pane-border-lines)"
 check "and carry the arrow indicators"      both         "$(tt show-options -gv pane-border-indicators)"
 
+echo "== 5c. the explode/collapse key is bound =="
+has "prefix+e runs the toggle" 'burst-toggle' "$(tt list-keys -T prefix e 2>/dev/null)"
+
 echo "== 6. clicks on row 0 route: buttons to us, tabs to tmux =="
 K="$(tt list-keys -T root MouseDown1Status)"
 has "row-0 button ranges are routed" '#{m:agent_' "$K"
@@ -137,11 +140,13 @@ t2 -f /dev/null new-session -d -s alpha -x 100 -y 24
 t2 set-option -g @agent_tmux_window_buttons off
 t2 set-option -g @agent_tmux_window_border off
 t2 set-option -g @agent_tmux_pane_highlight off
+t2 set-option -g @agent_tmux_burst_key off
 load_on "$SOCK2"
 hasnt "buttons off: row 0 untouched" '@agent_tmux_buttons' "$(t2 show-options -gv 'status-format[0]')"
 check "border off: the tab format is untouched" "$STOCK_CUR" "$(t2 show-options -gv window-status-current-format)"
 check "row 1 still installs with both off" 2 "$(t2 show-options -gv status)"
 check "pane highlight off: tmux's border style is untouched" "$STOCK_PANE" "$(t2 show-options -gv pane-border-style)"
+check "burst key off: nothing is bound" 1 "$(t2 list-keys -T prefix e >/dev/null 2>&1 && echo 0 || echo 1)"
 
 echo "== 8. labels and colours are themable =="
 t3(){ tmux -L "$SOCK3" "$@"; }

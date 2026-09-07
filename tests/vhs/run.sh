@@ -266,7 +266,7 @@ exec tmux -L \$S attach -t s
 EOF
   chmod +x "$sh"
   { tape_header "$OUT/$name.gif"
-    printf 'Set TypingSpeed 5ms\nType "bash %s"\nEnter\nSleep 3s\n' "$sh"
+    printf 'Set TypingSpeed 5ms\nType "bash %s"\nEnter\nSleep 5s\n' "$sh"
     click_at 2; click_at 6; click_at 10
     printf 'Screenshot "%s"\nSleep 5s\n' "$OUT/$name.png"
   } >"$tape"
@@ -301,6 +301,81 @@ run_click(){
   fi
 }
 
+# Explode and collapse, driven by the real key binding through a real client.
+# The assertion is tmux's own state plus the pixels: with the panes burst out
+# there is no pane divider on screen, and collapsing brings it back -- which is
+# what sample-pane-border.sh already measures for the row-0 scenarios.
+scn_burst(){ # <state file>
+  local name=burst sock=brs cfg sh tape
+  # catppuccin's own window module renders the host, not #{window_name}, so
+  # without these the recorded GIF cannot show the half of this feature that is
+  # the tab names -- stack, stack·2, stack·3.
+  cfg="$(mkconf "$name" "$ROW0_CONF"$'\nset -g @catppuccin_window_text " #W"\nset -g @catppuccin_window_current_text " #W"')"
+  sh="$OUT/$name.run.sh"; tape="$OUT/$name.tape"
+  cat >"$sh" <<EOF
+#!/usr/bin/env bash
+S=$sock
+tmux -L \$S kill-server 2>/dev/null
+tmux -L \$S -f $cfg new-session -d -s s -n stack -x 136 -y 22
+tmux -L \$S split-window -h -t s
+tmux -L \$S split-window -v -t s
+(
+  # The layout has to be captured with the CLIENT attached: a session resizes to
+  # its client on attach, and the layout string encodes the window size -- taken
+  # before that, it would differ for a reason that has nothing to do with burst.
+  sleep 2
+  tmux -L \$S display-message -p -t s '#{window_layout}' > $1.layout
+  sleep 10
+  tmux -L \$S list-windows -t s -F 'W #{window_index} #{window_name} #{window_panes}' > $1
+  tmux -L \$S display-message -p -t s:1 'L #{window_layout}' >> $1
+) &
+exec tmux -L \$S attach -t s
+EOF
+  chmod +x "$sh"
+  { tape_header "$OUT/$name.gif"
+    printf 'Set TypingSpeed 5ms\nType "bash %s"\nEnter\nSleep 3s\n' "$sh"
+    printf 'Screenshot "%s.before.png"\n' "$OUT/$name"
+    printf 'Ctrl+b\nSleep 300ms\nType "e"\nSleep 3s\n'          # explode
+    printf 'Screenshot "%s.exploded.png"\n' "$OUT/$name"
+    printf 'Ctrl+b\nSleep 300ms\nType "e"\nSleep 3s\n'          # collapse
+    printf 'Screenshot "%s.after.png"\nSleep 6s\n' "$OUT/$name"
+  } >"$tape"
+  echo "$tape"
+}
+run_burst(){
+  local state="$OUT/burst.state" name=burst
+  printf '== %-12s ==  expect: prefix+e explodes 3 panes into 3 tabs, and puts them back\n' "$name"
+  rm -f "$state" "$state.layout"
+  render "$name" "$(scn_burst "$state")" brs 240 || return
+  if [ ! -s "$state" ]; then
+    echo "  $(rdn FAIL)  the session never reported its state — see $OUT/$name.log"
+    FAIL=$((FAIL+1)); return
+  fi
+  local wins panes layout before div_before div_burst div_after
+  wins="$(grep -c '^W ' "$state")"
+  panes="$(awk '$1=="W" {print $NF}' "$state" | paste -sd, -)"
+  layout="$(sed -n 's/^L //p' "$state")"
+  before="$(cat "$state.layout" 2>/dev/null)"
+  div_before="$(bash "$HERE/sample-pane-border.sh" "$OUT/$name.before.png")"
+  div_burst="$(bash "$HERE/sample-pane-border.sh" "$OUT/$name.exploded.png")"
+  div_after="$(bash "$HERE/sample-pane-border.sh" "$OUT/$name.after.png")"
+  printf '  observed: %s window(s), panes=%s; borders %s -> %s -> %s\n' \
+    "$wins" "$panes" "$div_before" "$div_burst" "$div_after"
+  # Back to one window of three panes, the layout byte-identical to the one the
+  # session reported before the key was ever pressed, and the divider gone from
+  # the screen while exploded.
+  # div_before is asserted too, not just printed: without it a window that never
+  # got its splits would still satisfy "no divider while exploded".
+  if [ "$wins" = 1 ] && [ "$panes" = 3 ] && [ "$layout" = "$before" ] \
+     && [ "$div_before" != noborder ] && [ "$div_burst" = noborder ] \
+     && [ "$div_after" != noborder ]; then
+    echo "  $(grn PASS)  $OUT/$name.gif"; PASS=$((PASS+1))
+  else
+    echo "  $(rdn FAIL)  want 1 window of 3 panes, layout restored, divider back"
+    FAIL=$((FAIL+1))
+  fi
+}
+
 do_det(){
   run_scenario single     "blue,yellow,red,green" "$(scn_single)"     sgl 180
   run_scenario aggregate  "blue,yellow,red,blue"  "$(scn_aggregate)"  agg 180
@@ -317,6 +392,7 @@ do_row0(){
   run_scenario row0-buttons "$ROW0_WIDE"   "$(scn_row0 row0-buttons r0w 1100 136)" r0w 180 "$HERE/sample-row0.sh" 'b?c-'
   run_scenario row0-mobile  "$ROW0_MOBILE" "$(scn_row0 row0-mobile  r0m  550  55)"  r0m 180 "$HERE/sample-row0.sh" 'b?c-'
   run_click
+  run_burst
 }
 # Real-agent end-to-end. NOTE: claude does not enter its TUI under vhs/ttyd (it
 # prints the trust prompt and returns to the shell), so the real-claude scenario is
@@ -340,6 +416,7 @@ case "${1:-deterministic}" in
   row0-buttons) run_scenario row0-buttons "$ROW0_WIDE"   "$(scn_row0 row0-buttons r0w 1100 136)" r0w 180 "$HERE/sample-row0.sh" 'b?c-' ;;
   row0-mobile)  run_scenario row0-mobile  "$ROW0_MOBILE" "$(scn_row0 row0-mobile  r0m  550  55)"  r0m 180 "$HERE/sample-row0.sh" 'b?c-' ;;
   row0-click)   run_click ;;
+  burst)        run_burst ;;
   real-claude) do_real_one=1; run_scenario real-claude "blue,yellow" "$(real real-claude rc 'claude --dangerously-skip-permissions' 'say hi in one word' 22)" rc 260 ;;
   real-codex)  run_scenario real-codex "blue,yellow" "$(real real-codex rx 'codex -c model_reasoning_effort=low --dangerously-bypass-approvals-and-sandbox' 'say hi in one word' 22)" rx 260 ;;
   *) echo "unknown scenario: $1"; exit 2 ;;

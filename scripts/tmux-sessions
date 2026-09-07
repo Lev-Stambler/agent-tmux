@@ -29,6 +29,18 @@
 #   split lr|tb [client]
 #                     split <client>'s pane side by side (lr) or stacked (tb),
 #                     in the same directory. Row 0's "│" and "─" buttons.
+#   burst [client]    explode <client>'s window: every pane becomes its own
+#                     full-screen window, named "<window>", "<window>·2", ...
+#                     The layout, the pane order and the active pane are stashed
+#                     on the base window as @agent_burst_* so it can be undone.
+#   gather [client]   put them back: join every pane of the group into the base
+#                     window in its original ORDER, then re-apply the saved
+#                     layout (select-layout matches panes to cells positionally,
+#                     so the order is what makes it exact).
+#   burst-toggle [client]
+#                     gather when the current window belongs to a burst group,
+#                     burst otherwise. This is the bound key, and it works from
+#                     a satellite as well as from the base.
 #   click RANGE [client]
 #                     MouseDown1Status handler: jumps when RANGE is a
 #                     session_N user range, runs the window action for an
@@ -51,8 +63,8 @@ MENU_LABEL='☰'       # hamburger glyph shown instead of the rail when narrow
 NARROW=''            # force a breakpoint; empty => collapse only when it doesn't fit
 S_BLOCKED='#f38ba8'  # badge colour: a pane is blocked
 S_WAITING='#f9e2af'  # badge colour: a pane finished its turn
-MENU_MAX=15          # hard cap on menu items; 0 = only the client-height cap
-                     # (12 sessions + the 3 window actions the tail always adds)
+MENU_MAX=16          # hard cap on menu items; 0 = only the client-height cap
+                     # (12 sessions + the 4 window actions the tail always adds)
 
 load_opts(){
   local opts
@@ -93,6 +105,57 @@ sessions(){ tmux list-sessions -F '#{session_name}' 2>/dev/null; }
 client_fmt(){ # <client> <format>
   local c="${1:-}"
   tmux display-message ${c:+-c "$c"} -p "$2" 2>/dev/null
+}
+
+# Recompute one window's agent colour from the panes that are in it NOW.
+# @agent_state is a PANE option and travels with the pane; the colour it
+# produces is a WINDOW option and does not. Moving panes between windows --
+# exactly what burst and gather do -- therefore leaves the window a pane left
+# painted with an aggregate it no longer has, and the window it joined painted
+# with nothing at all. Verified: break a blocked pane out and the old tab stays
+# red while the new one shows no colour.
+paint_win(){ # <window>
+  local st p
+  st="$(cd "$(dirname "$0")" && pwd)/agent-status.sh"
+  [ -x "$st" ] || return 0
+  p="$(tmux list-panes -t "$1" -F '#{pane_id}' 2>/dev/null | head -1)"
+  [ -n "$p" ] && TMUX_PANE="$p" "$st" paint </dev/null >/dev/null 2>&1
+  return 0
+}
+
+# One `tmux` call per window, not four: each is a fork, and a six-pane explode
+# would otherwise pay twenty-four of them on a keystroke.
+burst_mark(){ # <window> <group id> <layout> <pane order> <active pane>
+  tmux set-option -w -t "$1" @agent_burst_of "$2" \; \
+       set-option -w -t "$1" @agent_burst_layout "$3" \; \
+       set-option -w -t "$1" @agent_burst_panes "$4" \; \
+       set-option -w -t "$1" @agent_burst_active "$5" 2>/dev/null
+}
+burst_unmark(){ # <window>
+  tmux set-option -w -t "$1" -u @agent_burst_of \; \
+       set-option -w -t "$1" -u @agent_burst_layout \; \
+       set-option -w -t "$1" -u @agent_burst_panes \; \
+       set-option -w -t "$1" -u @agent_burst_active \; \
+       set-option -w -t "$1" -u @agent_burst_zoom \; \
+       set-option -w -t "$1" -u @agent_burst_auto 2>/dev/null
+}
+
+# tmux resolves a target that no longer exists to the CURRENT one and still
+# exits 0 -- `display-message -t @dead` prints an empty line and succeeds -- so
+# "is it still there?" has to be asked of a real list. Measured: without this
+# the promote path never fired, because the dead base looked alive.
+win_alive(){ # <window id>
+  tmux list-windows -a -F '#{window_id}' 2>/dev/null | grep -qx "$1"
+}
+pane_win(){  # <pane id> -> the window holding it, empty if the pane is gone
+  tmux list-panes -a -F '#{pane_id} #{window_id}' 2>/dev/null \
+    | awk -v p="$1" '$1==p {print $2}'
+}
+
+# Every window of a burst group, base included, in window order.
+burst_members(){ # <group id>
+  tmux list-windows -a -F '#{window_id} #{@agent_burst_of}' 2>/dev/null \
+    | awk -v g="$1" '$2==g {print $1}'
 }
 
 # Where does a status-bar range go? One implementation, two callers: `route`
@@ -150,6 +213,180 @@ case "${1:-}" in
       tmux split-window "$flag"
     fi
     exit 0
+    ;;
+  burst)
+    # Explode: every pane of the client's window becomes its own full-screen
+    # window, named after the original. The layout, the pane ORDER and the pane
+    # you were in are stashed on every window of the group so `gather` can undo
+    # it exactly. Ids only, never indices -- renumber-windows shifts those the
+    # moment any window closes.
+    client="${2:-}"
+    w="$(client_fmt "$client" '#{window_id}')"
+    [ -n "$w" ] || exit 0
+    # Never nest a group in a group. burst-toggle routes an exploded window to
+    # gather, but `burst` is a subcommand in its own right, and run on a
+    # satellite it would re-mark that window as its own base and quietly secede
+    # it from the group it belongs to.
+    [ -z "$(tmux show-window-options -v -t "$w" @agent_burst_of 2>/dev/null)" ] || exit 0
+    n="$(tmux display-message -p -t "$w" '#{window_panes}' 2>/dev/null)"
+    case "$n" in ''|*[!0-9]*) exit 0 ;; esac
+    if [ "$n" -lt 2 ]; then
+      # A toggle that silently does nothing is indistinguishable from a key that
+      # is not bound. -c puts the message on the terminal of whoever pressed it.
+      tmux display-message ${client:+-c "$client"} -d 1500 \
+        "agent-tmux: one pane — nothing to explode" 2>/dev/null
+      exit 0
+    fi
+    # #{window_layout} ignores zoom, so the saved string is right either way --
+    # but breaking panes out from under a zoomed one is needless risk.
+    zoom="$(tmux display-message -p -t "$w" '#{window_zoomed_flag}' 2>/dev/null)"
+    [ "$zoom" = 1 ] && tmux resize-pane -Z -t "$w" 2>/dev/null
+    layout="$(tmux display-message -p -t "$w" '#{window_layout}' 2>/dev/null)"
+    name="$(tmux display-message -p -t "$w" '#{window_name}' 2>/dev/null)"
+    auto="$(tmux show-window-options -v -t "$w" automatic-rename 2>/dev/null)"
+    active="$(client_fmt "$client" '#{pane_id}')"
+    panes="$(tmux list-panes -t "$w" -F '#{pane_id}' 2>/dev/null | tr '\n' ' ')"
+    # The record goes on EVERY member, base included, and the base's
+    # @agent_burst_of points at itself. Two things fall out of that: "am I in a
+    # group?" is one read that does not care which window you are on, and
+    # closing the base does not take the layout with it -- any survivor can
+    # still put the rest back.
+    burst_mark "$w" "$w" "$layout" "$panes" "$active"
+    tmux set-option -w -t "$w" @agent_burst_zoom "${zoom:-0}" 2>/dev/null
+    tmux set-option -w -t "$w" @agent_burst_auto "${auto:-on}" 2>/dev/null
+    # Pin the base's name too, or a window whose name tracks its process drifts
+    # to "node" while its own satellites still read "api·2" and the family stops
+    # reading as one. Pin it by turning automatic-rename off, NOT by renaming it
+    # to itself: rename-window expands its argument as a format (measured: a
+    # window named '#S-hash' comes back 'sess-hash'), so that round trip would
+    # destroy any name containing a '#'. break-pane -n does NOT expand -- the
+    # two are opposite, which is why the satellite names below are passed
+    # through unescaped. @agent_burst_auto puts the option back on collapse.
+    tmux set-option -w -t "$w" automatic-rename off 2>/dev/null
+    i=1; prev="$w"; first=1
+    # shellcheck disable=SC2086 -- $panes is a list of pane ids on purpose
+    for p in $panes; do
+      # The first pane stays put, so the base window keeps its id, its name and
+      # its options -- and we never break the LAST pane out of a window, the one
+      # case whose behaviour the man page does not define.
+      [ "$first" = 1 ] && { first=0; continue; }
+      i=$((i+1))
+      # Each break chains off the previous satellite so the tabs read left to
+      # right in pane order. -a could not be dated to the 3.2 floor, hence the
+      # fallback: without it the window still appears, just at the end.
+      nw="$(tmux break-pane -d -a -P -F '#{window_id}' -s "$p" -t "$prev" -n "$name·$i" 2>/dev/null)" \
+        || nw="$(tmux break-pane -d -P -F '#{window_id}' -s "$p" -n "$name·$i" 2>/dev/null)"
+      [ -n "$nw" ] || continue
+      burst_mark "$nw" "$w" "$layout" "$panes" "$active"
+      # Without this the running command renames the tab and the ·N is lost.
+      tmux set-option -w -t "$nw" automatic-rename off 2>/dev/null
+      prev="$nw"
+    done
+    # Repaint every window of the group: the panes just moved, so both the tab
+    # the pane left and the tab it landed on are showing the wrong colour.
+    for m in $(burst_members "$w"); do paint_win "$m"; done
+    # Land on the pane you were reading, whichever window it now lives in.
+    # `focus` and not select-window: it switches the CLIENT's session first, so
+    # this still works when the group is spread across sessions.
+    [ -n "$active" ] && "$0" focus "$active" "$client"
+    "$0" refresh
+    exit 0
+    ;;
+  gather)
+    # Collapse: join every pane of the group back into the base window, in the
+    # order they were in, then re-apply the saved layout. select-layout matches
+    # panes to cells POSITIONALLY -- the pane ids in a layout string are written
+    # on dump and never read back -- so rebuilding the order first is the whole
+    # trick, and is what makes the restore byte-exact.
+    client="${2:-}"
+    w="$(client_fmt "$client" '#{window_id}')"
+    [ -n "$w" ] || exit 0
+    gid="$(tmux show-window-options -v -t "$w" @agent_burst_of 2>/dev/null)"
+    [ -n "$gid" ] || exit 0                      # not part of a group: no-op
+    # The record is read off the window we are standing on, which is a member by
+    # definition and is certainly alive. The base is where the panes go home to
+    # -- unless it was closed while the group was open, in which case this
+    # window is promoted and takes them instead.
+    layout="$(tmux show-window-options -v -t "$w" @agent_burst_layout 2>/dev/null)"
+    order="$(tmux show-window-options -v -t "$w" @agent_burst_panes 2>/dev/null)"
+    active="$(tmux show-window-options -v -t "$w" @agent_burst_active 2>/dev/null)"
+    base="$gid"
+    win_alive "$base" || base="$w"               # base closed: this window takes over
+    # Panes a satellite gained while it was out on its own come home too, at the
+    # end: losing a pane would be far worse than losing the exact layout.
+    extra=""
+    for sw in $(burst_members "$gid"); do
+      for sp in $(tmux list-panes -t "$sw" -F '#{pane_id}' 2>/dev/null); do
+        case " $order " in *" $sp "*) ;; *) extra="$extra $sp" ;; esac
+      done
+    done
+    prev="$(tmux list-panes -t "$base" -F '#{pane_id}' 2>/dev/null | tail -1)"
+    # shellcheck disable=SC2086 -- both are lists of pane ids on purpose
+    for p in $order $extra; do
+      pw="$(pane_win "$p")"
+      [ -n "$pw" ] || continue                   # that pane closed while exploded
+      [ "$pw" = "$base" ] && { prev="$p"; continue; }
+      # Joining onto the previously placed pane is what rebuilds the order, but
+      # it also halves that pane every time: 22 rows -> 11 -> 5 -> 2 -> no room.
+      # The other axis buys a few more, and past that `tiled` redistributes the
+      # window without touching its pane ORDER, which is the thing we are here
+      # to preserve. Measured: twelve panes lost three without this.
+      tmux join-pane -d -v -s "$p" -t "$prev" 2>/dev/null \
+        || tmux join-pane -d -h -s "$p" -t "$prev" 2>/dev/null \
+        || { tmux select-layout -t "$base" tiled 2>/dev/null
+             tmux join-pane -d -v -s "$p" -t "$prev" 2>/dev/null \
+               || tmux join-pane -d -h -s "$p" -t "$prev" 2>/dev/null; } \
+        || continue
+      prev="$p"
+    done
+    # A satellite that was split further leaves more panes than the layout has
+    # cells, and tmux refuses such a layout outright ("have N panes but need M").
+    tmux select-layout -t "$base" "$layout" 2>/dev/null \
+      || tmux select-layout -t "$base" tiled 2>/dev/null
+    # Zoom is not in the layout string, so it is carried separately.
+    [ "$(tmux show-window-options -v -t "$base" @agent_burst_zoom 2>/dev/null)" = 1 ] \
+      && [ -n "$active" ] && tmux resize-pane -Z -t "$active" 2>/dev/null
+    # Give the base's automatic-rename back, and prefer unsetting it to leaving
+    # a window-local copy of what the global already says.
+    auto="$(tmux show-window-options -v -t "$base" @agent_burst_auto 2>/dev/null)"
+    if [ -n "$auto" ]; then
+      if [ "$auto" = "$(tmux show-options -gwv automatic-rename 2>/dev/null)" ]; then
+        tmux set-option -w -t "$base" -u automatic-rename 2>/dev/null
+      else
+        tmux set-option -w -t "$base" automatic-rename "$auto" 2>/dev/null
+      fi
+    fi
+    [ -n "$active" ] && "$0" focus "$active" "$client"
+    # Anything still holding panes could not be joined -- a window can only be
+    # split so many times. Leave the whole group marked in that case, so the key
+    # finishes the job on the next press instead of orphaning those panes with
+    # no way home.
+    left=0
+    for m in $(burst_members "$gid"); do
+      [ "$m" = "$base" ] && continue
+      [ -n "$(tmux list-panes -t "$m" -F '#{pane_id}' 2>/dev/null)" ] && left=$((left+1))
+    done
+    if [ "$left" -gt 0 ]; then
+      tmux display-message ${client:+-c "$client"} -d 2000 \
+        "agent-tmux: no room for $left more window(s) — press again after closing a pane" 2>/dev/null
+    else
+      # The base is in this list too: its @agent_burst_of points at itself.
+      for m in $(burst_members "$gid"); do burst_unmark "$m"; paint_win "$m"; done
+    fi
+    "$0" refresh
+    exit 0
+    ;;
+  burst-toggle)
+    # The bound verb. Reading the state off the CURRENT window is what lets the
+    # key collapse the group from a satellite as well as from the base -- you
+    # press it where you are, not where you started.
+    client="${2:-}"
+    w="$(client_fmt "$client" '#{window_id}')"
+    [ -n "$w" ] || exit 0
+    if [ -n "$(tmux show-window-options -v -t "$w" @agent_burst_of 2>/dev/null)" ]; then
+      exec "$0" gather "$client"
+    fi
+    exec "$0" burst "$client"
     ;;
   status)
     current="${2:-}"; width="${3:-}"
@@ -258,8 +495,9 @@ EOF
     q(){ local v="${1//\\/\\\\}"; v="${v//\"/\\\"}"; printf '"%s"' "$v"; }
     # Never a two-character key: tmux cannot parse "10" and silently renders the
     # item with NO shortcut, making it unreachable from the keyboard.
-    # c, h and v are reserved for the window actions at the foot of the menu.
-    LETTERS='qwertyuiopzxbnm'
+    # c, h, v, e, s and p are reserved for the tail entries at the foot of the
+    # menu; handing one out twice makes one of the two unreachable.
+    LETTERS='qwrtyuiozxbnm'
     mkey(){ case "$1" in [1-9]) printf '%s' "$1" ;; *) printf '%s' "${LETTERS:$(( $1 - 10 )):1}" ;; esac; }
 
     # A menu taller than the client draws NOTHING at all (max items is about
@@ -272,14 +510,15 @@ EOF
       cap=$(( h - 4 ))
     fi
     [ "$MENU_MAX" -gt 0 ] 2>/dev/null && [ "$cap" -gt "$MENU_MAX" ] && cap="$MENU_MAX"
-    # 6, not 4: four of those slots are the always-present tail, and a menu that
+    # 7, not 5: five of those slots are the always-present tail, and a menu that
     # lists no sessions at all is not worth drawing.
-    [ "$cap" -lt 6 ] && cap=6
+    [ "$cap" -lt 7 ] && cap=7
 
-    # The tail (new window / split right / split down / new project) is always
-    # there, so it is counted against the cap from the start -- otherwise a
-    # short client gets a menu taller than itself, which tmux draws as NOTHING.
-    args=(); n=4
+    # The tail (new window / split right / split down / explode / new project)
+    # is always there, so it is counted against the cap from the start --
+    # otherwise a short client gets a menu taller than itself, which tmux draws
+    # as NOTHING.
+    args=(); n=5
     att="$(tmux list-panes -a -F '#{@agent_state}|#{session_name}|#{window_index}|#{pane_index}|#{pane_id}' 2>/dev/null \
            | grep -E '^(blocked|waiting)\|' | sort)"
     if [ -n "$att" ]; then
@@ -318,10 +557,16 @@ EOF
     # The row-0 buttons, reachable without a mouse. Plenty of phone SSH clients
     # never send mouse events at all, and below tmux 3.4 nothing on the status
     # bar is clickable on any client -- so every button has a keyboard path.
+    # The explode label is a FORMAT, like the session bullet above: one staged
+    # command serves every client, and tmux expands it per client at draw time,
+    # so a client sitting on an exploded window reads "collapse panes" while one
+    # on an ordinary window reads "explode panes".
     args+=( '' \
             "new window"  c "run-shell \"$SELF newwin '#{client_name}'\"" \
             "split right" h "run-shell \"$SELF split lr '#{client_name}'\"" \
-            "split down"  v "run-shell \"$SELF split tb '#{client_name}'\"" )
+            "split down"  v "run-shell \"$SELF split tb '#{client_name}'\"" \
+            "#{?#{==:#{@agent_burst_of},},explode panes,collapse panes}" e \
+              "run-shell \"$SELF burst-toggle '#{client_name}'\"" )
     args+=( '' "new project…" p "run-shell \"$SELF click picker '#{client_name}'\"" )
 
     case "$mode" in
@@ -393,6 +638,7 @@ EOF
   *)
     echo "usage: tmux-sessions status [current] [width] | jump N [client] |" >&2
     echo "       newwin [client] | split lr|tb [client] |" >&2
+    echo "       burst [client] | gather [client] | burst-toggle [client] |" >&2
     echo "       click RANGE [client] [x] [y] | route RANGE | menu[-args] CLIENT" >&2
     exit 2
     ;;

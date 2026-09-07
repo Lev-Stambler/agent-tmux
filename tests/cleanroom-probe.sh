@@ -89,7 +89,7 @@ else
 fi
 
 echo "== 4. bindings a stranger gets for free =="
-for k in p o g G 1 3 9; do
+for k in p o g G e 1 3 9; do
   tmux -L $S list-keys -T prefix "$k" >/dev/null 2>&1 && ok "prefix+$k bound" || bad "prefix+$k MISSING"
 done
 tmux -L $S list-keys -T root MouseDown1Status >/dev/null 2>&1 && ok "status click routing bound" || bad "mouse routing MISSING"

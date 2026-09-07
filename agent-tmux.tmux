@@ -252,6 +252,12 @@ esac
 MENUKEY="$(opt @agent_tmux_menu_key 'm')"
 [ "$MENUKEY" = off ] || tmux bind-key "$MENUKEY" run-shell -b "$SESSIONS menu '#{client_name}'"
 
+# Explode the window into one full-screen window per pane, and put it back.
+# One key both ways, and it reads the state off the window you are ON, so it
+# collapses the group from any of its tabs -- you press it where you are.
+BURSTKEY="$(opt @agent_tmux_burst_key 'e')"    # prefix key; 'off' unbinds
+[ "$BURSTKEY" = off ] || tmux bind-key "$BURSTKEY" run-shell -b "$SESSIONS burst-toggle '#{client_name}'"
+
 # Seed the staged menu so the very first tap works, before any status redraw.
 tmux set-option -g @agent_menu_cmd "$("$SESSIONS" menu-cmd "" 0 2>/dev/null)" 2>/dev/null
 

@@ -177,6 +177,31 @@ run "$A" clear; run "$A" blocked
 check "unset restores the default red" red "$(wcolor)"
 reset
 
+echo "== 11. paint: recompute a window's colour without touching any pane's state =="
+# The tab colour is a WINDOW option derived from the panes in that window, but
+# @agent_state is a PANE option -- so moving a pane between windows (which is
+# what the explode/collapse toggle does) leaves the old window painted with an
+# aggregate it no longer has, and the new window painted with nothing at all.
+reset
+run "$A" blocked
+check "the window is red while the blocked pane is in it" red "$(wcolor)"
+LAST_B="$(tt display-message -p -t "$A" '#{@agent_last}')"
+NW="$(tt break-pane -d -P -F '#{window_id}' -s "$A")"
+check "the colour is stale after the pane leaves" red "$(wcolor)"
+run "$A" paint
+NEWFMT="$(tt show-window-options -v -t "$NW" window-status-format 2>/dev/null)"
+case "$NEWFMT" in *"$RED"*) ok "paint colours the window the pane moved to";;
+                  *) bad "new window not painted: '$NEWFMT'";; esac
+check "paint leaves the pane's own state alone" blocked "$(tt display-message -p -t "$A" '#{@agent_state}')"
+# A repaint is not an interaction: agent-review ranks panes by @agent_last, and
+# bumping it here would push a pane you never touched to the top of that list.
+check "paint does not re-stamp the interaction time" "$LAST_B" "$(tt display-message -p -t "$A" '#{@agent_last}')"
+# ...and the window the pane LEFT must fall back to the theme.
+run "$B" paint
+check "the abandoned window drops its override" "" "$(tt show-window-options -v -t "$WIN" window-status-format 2>/dev/null)"
+tt join-pane -d -s "$A" -t "$B" 2>/dev/null
+run "$A" clear; run "$B" clear
+
 echo
 echo "----------------------------------------"
 printf 'Total: %d passed, %d failed\n' "$PASS" "$FAIL"

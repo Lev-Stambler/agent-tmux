@@ -12,7 +12,14 @@
 #   priority (highest concern wins): blocked > waiting > working > acked > none
 #
 # Driven by Claude Code + Codex lifecycle hooks (and the Codex `notify` program),
-# called as:  agent-status.sh <working|waiting|blocked|done|clear>
+# called as:  agent-status.sh <working|waiting|blocked|done|clear|paint>
+#
+# `paint` writes no pane state at all: it only recomputes the window aggregate
+# from the panes currently in the window. That is what the explode/collapse
+# toggle needs -- @agent_state is a PANE option and travels with the pane, but
+# the colour it produces is a WINDOW option and does not, so moving a pane
+# leaves the window it left painted with an aggregate it no longer has and the
+# window it joined painted with nothing.
 #
 # Robustness contract:
 #   * Drains stdin (hooks pipe JSON; an unread pipe can SIGPIPE the caller).
@@ -117,7 +124,9 @@ refresh(){ tmux refresh-client -S 2>/dev/null; }
 
 # Every hook call is an interaction: stamp the pane so agent-review.sh's `t`
 # recency filter can rank/hide panes by when their agent last did anything.
-tmux set-option -p -t "$pane" @agent_last "$(date +%s)" 2>/dev/null
+# A repaint is not an interaction -- bumping it there would push a pane nobody
+# touched to the top of that ranking.
+[ "$state" = paint ] || tmux set-option -p -t "$pane" @agent_last "$(date +%s)" 2>/dev/null
 
 # --- store THIS pane's state (per-pane option, auto-removed when the pane closes) --
 # An end-of-turn state (waiting/done) with bg work still running is not "needs you".
@@ -127,6 +136,7 @@ esac
 case "$state" in
   clear)                        tmux set-option -p -t "$pane" -u @agent_state 2>/dev/null ;;
   working|waiting|blocked|done) tmux set-option -p -t "$pane" @agent_state "$state" 2>/dev/null ;;
+  paint) ;;      # recompute only: no pane's state is written
   *) exit 0 ;;   # unknown state -> no-op
 esac
 

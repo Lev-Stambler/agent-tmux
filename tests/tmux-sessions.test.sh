@@ -266,11 +266,175 @@ case "$J" in *'new window'*)   ok "menu offers a new window";;   *) bad "no new-
 case "$J" in *'split right'*)  ok "menu offers a left/right split";; *) bad "no split-right entry";; esac
 case "$J" in *'split down'*)   ok "menu offers a top/bottom split";; *) bad "no split-down entry";; esac
 case "$J" in *"newwin '#{client_name}'"*) ok "menu passes the client through";; *) bad "menu drops the client";; esac
+case "$J" in *'explode panes'*) ok "menu offers the explode toggle";; *) bad "no explode entry";; esac
+# The label is a format so one staged menu serves every client: it has to read
+# "collapse panes" for a client standing on an exploded window and "explode
+# panes" for one that is not.
+LBL="$(printf '%s\n' "$J" | grep -F 'explode panes' | head -1)"
+check "on an ordinary window it says explode" "explode panes" "$(tt display-message -c "$CLIENT" -p "$LBL")"
+case "$J" in *"burst-toggle '#{client_name}'"*) ok "the explode entry is the toggle";; *) bad "explode entry wrong command";; esac
+# 'e' now belongs to the tail, so it must not also be handed to an attention row
+# -- a duplicate key makes one of the two unreachable from the keyboard.
+tt set-option -p -t "$PANE_A" @agent_state blocked >/dev/null
+tt set-option -p -t "$PANE_B" @agent_state waiting >/dev/null
+DUPE="$(run menu-args "$CLIENT" 0 | awk 'NR%3==2 && $0 != ""' | sort | uniq -d | tr -d '\n')"
+check "no two menu items share a key" "" "$DUPE"
+tt set-option -p -t "$PANE_A" -u @agent_state >/dev/null
+tt set-option -p -t "$PANE_B" -u @agent_state >/dev/null
 # The staged one-line command must still parse after the new entries.
 CMD="$(run menu-cmd "" 0)"
 check "menu-cmd is still a single line" 1 "$(printf '%s' "$CMD" | wc -l | awk '{print $1+1}')"
 QUOTES="$(printf '%s' "$CMD" | tr -cd '"' | wc -c)"
 check "quotes still balance" 0 "$(( QUOTES % 2 ))"
+
+echo "== 20. burst: every pane of the window becomes its own full-screen window =="
+run jump 4 "$CLIENT"                       # charlie
+W="$(tt display-message -c "$CLIENT" -p '#{window_id}')"
+tt rename-window -t "$W" burstme
+P1="$(tt display-message -t "$W" -p '#{pane_id}')"
+P2="$(tt split-window -t "$W" -h -P -F '#{pane_id}')"
+P3="$(tt split-window -t "$P2" -v -P -F '#{pane_id}')"
+LAYOUT="$(tt display-message -t "$W" -p '#{window_layout}')"
+ORDER="$(tt list-panes -t "$W" -F '#{pane_id}' | tr '\n' ' ')"
+tt select-pane -t "$P2"                    # the pane the user is looking at
+W0="$(tt list-windows -t charlie | wc -l)"
+run burst "$CLIENT"
+check "each pane got a window" "$((W0+2))" "$(tt list-windows -t charlie | wc -l)"
+check "the base window keeps exactly one pane" 1 "$(tt list-panes -t "$W" | wc -l)"
+check "the base keeps its name"       burstme    "$(tt display-message -t "$W" -p '#{window_name}')"
+check "satellites take the name + index" "burstme·2" "$(tt display-message -t "$P2" -p '#{window_name}')"
+check "numbered in pane order"           "burstme·3" "$(tt display-message -t "$P3" -p '#{window_name}')"
+# Named tabs only stay named if automatic-rename is off: the running command
+# would otherwise rename the tab out from under the group.
+check "automatic-rename is off on a satellite" off "$(tt show-window-options -v -t "$P2" automatic-rename)"
+check "satellites point back at the base" "$W" "$(tt show-window-options -v -t "$P2" @agent_burst_of)"
+check "the base records the layout"  "$LAYOUT" "$(tt show-window-options -v -t "$W" @agent_burst_layout)"
+# Ids, never indices: renumber-windows shifts indices whenever a window closes.
+case "$(tt show-window-options -v -t "$W" @agent_burst_panes)" in
+  *"$P2"*"$P3"*) ok "the base records the pane order";; *) bad "pane order not recorded";; esac
+check "the client follows the pane it was on" "$P2" "$(tt display-message -c "$CLIENT" -p '#{pane_id}')"
+# rename-window expands its argument as a format and break-pane -n does not --
+# opposite behaviours, both measured. A '#' in the name is where that bites: the
+# base must not be renamed to itself, and the satellite name must not be escaped.
+run burst-toggle "$CLIENT"
+tt rename-window -t "$W" '##S-hash'        # tmux expands this to the literal #S-hash
+check "a hostile name is set up" '#S-hash' "$(tt display-message -t "$W" -p '#{window_name}')"
+run burst "$CLIENT"
+check "the base keeps a '#' name verbatim"      '#S-hash'   "$(tt display-message -t "$W" -p '#{window_name}')"
+check "and the satellite inherits it verbatim"  '#S-hash·2' "$(tt display-message -t "$P2" -p '#{window_name}')"
+run burst-toggle "$CLIENT"
+tt rename-window -t "$W" burstme
+run burst "$CLIENT"
+
+echo "== 21. the toggle collapses the group back, from a satellite =="
+run burst-toggle "$CLIENT"                 # client is on P2's satellite, not the base
+check "one window again"        "$W0" "$(tt list-windows -t charlie | wc -l)"
+check "every pane is back"      3     "$(tt list-panes -t "$W" | wc -l)"
+check "in their original order" "$ORDER" "$(tt list-panes -t "$W" -F '#{pane_id}' | tr '\n' ' ')"
+# The whole point. select-layout assigns panes positionally, so this only holds
+# if the join order was rebuilt correctly first.
+check "and the layout is restored byte for byte" "$LAYOUT" "$(tt display-message -t "$W" -p '#{window_layout}')"
+check "the pane you were in is selected" "$P2" "$(tt display-message -c "$CLIENT" -p '#{pane_id}')"
+check "the burst state is cleared" "" "$(tt show-window-options -v -t "$W" @agent_burst_layout 2>/dev/null)"
+check "no satellite marks left behind" 0 "$(tt list-windows -a -F '#{@agent_burst_of}' | grep -c .)"
+
+echo "== 22. burst: a window with nothing to explode, and a zoomed one =="
+SOLO="$(tt new-window -t charlie -P -F '#{window_id}')"
+tt select-window -t "$SOLO"
+WN="$(tt list-windows -t charlie | wc -l)"
+run burst "$CLIENT"
+check "a single-pane window is a no-op" "$WN" "$(tt list-windows -t charlie | wc -l)"
+check "and records no state" "" "$(tt show-window-options -v -t "$SOLO" @agent_burst_layout 2>/dev/null)"
+# A toggle that silently does nothing is indistinguishable from a key that is
+# not bound at all.
+case "$(tt show-messages -t "$CLIENT" 2>/dev/null)" in
+  *'nothing to explode'*) ok "and says why";; *) bad "a silent no-op gives no feedback";; esac
+tt kill-window -t "$SOLO"
+# Zoom: #{window_layout} ignores it, so the round trip must still be exact.
+tt select-window -t "$W"; tt select-pane -t "$P1"; tt resize-pane -Z -t "$P1"
+run burst "$CLIENT"
+check "a zoomed window unzooms and explodes" "$((W0+2))" "$(tt list-windows -t charlie | wc -l)"
+run burst-toggle "$CLIENT"
+check "and still round-trips exactly" "$LAYOUT" "$(tt display-message -t "$W" -p '#{window_layout}')"
+# Zoom is not in the layout string, so it has to be carried separately -- losing
+# it silently is the one outcome to avoid.
+check "and comes back zoomed"  1    "$(tt display-message -t "$W" -p '#{window_zoomed_flag}')"
+check "on the pane that was zoomed" "$P1" "$(tt display-message -t "$W" -p '#{pane_id}')"
+tt resize-pane -Z -t "$P1"
+
+echo "== 23. burst: the group survives being messed with while it is open =="
+run burst "$CLIENT"
+tt kill-window -t "$P3"                    # a satellite closed while exploded
+run burst-toggle "$CLIENT"
+check "a closed satellite loses only its own pane" 2 "$(tt list-panes -t "$W" | wc -l)"
+check "the survivors still come home" "$P1 $P2 " "$(tt list-panes -t "$W" -F '#{pane_id}' | tr '\n' ' ')"
+check "state cleared after a partial collapse" "" "$(tt show-window-options -v -t "$W" @agent_burst_layout 2>/dev/null)"
+# A satellite split further has more panes than the saved layout has cells, and
+# tmux refuses such a layout outright ("have N panes but need M") -- so this has
+# to fall back rather than error.
+run burst "$CLIENT"
+SAT="$(tt display-message -t "$P2" -p '#{window_id}')"
+tt split-window -t "$P2" -v >/dev/null 2>&1
+OUT="$(run burst-toggle "$CLIENT" 2>&1)"; RC=$?
+check "collapsing a split satellite exits 0" 0 "$RC"
+check "it is silent"                        "" "$OUT"
+check "and brings every pane home"          3  "$(tt list-panes -t "$W" | wc -l)"
+
+echo "== 23b. burst: more panes than a window can re-split still all come home =="
+# Each join splits the pane placed before it, so the room halves every time:
+# 22 rows -> 11 -> 5 -> 2 -> fail. Measured: twelve panes out, nine home and
+# three windows orphaned with their marks already cleared -- no way back.
+DEEP="$(tt new-window -t charlie -P -F '#{window_id}' -n deep)"
+for _ in $(seq 11); do tt split-window -t "$DEEP" >/dev/null 2>&1; tt select-layout -t "$DEEP" tiled >/dev/null 2>&1; done
+DN="$(tt list-panes -t "$DEEP" | wc -l)"
+tt select-window -t "$DEEP"
+run burst "$CLIENT"
+run burst-toggle "$CLIENT"
+check "every pane comes home from a deep burst" "$DN" "$(tt list-panes -t "$DEEP" 2>/dev/null | wc -l)"
+check "and no window is orphaned" 0 "$(tt list-windows -a -F '#{@agent_burst_of}' | grep -c .)"
+tt kill-window -t "$DEEP" 2>/dev/null
+
+echo "== 23c. burst: a window already in a group is left alone =="
+tt select-window -t "$W"
+run burst "$CLIENT"
+SAT2="$(tt display-message -t "$P2" -p '#{window_id}')"
+tt select-window -t "$SAT2"
+BEFORE_OF="$(tt show-window-options -v -t "$SAT2" @agent_burst_of)"
+run burst "$CLIENT"                        # burst, not the toggle: must refuse
+check "a satellite does not secede into its own group" "$BEFORE_OF" \
+      "$(tt show-window-options -v -t "$SAT2" @agent_burst_of)"
+run burst-toggle "$CLIENT"
+check "the group still collapses afterwards" 3 "$(tt list-panes -t "$W" | wc -l)"
+
+echo "== 24. burst: the agent colours follow the panes onto their new tabs =="
+# The whole reason this feature earns its place: a window of four agents shows
+# ONE aggregated colour, and exploding gives each agent its own coloured tab.
+# The colour is a window option and the state a pane option, so neither end is
+# right until the aggregate is recomputed per window.
+P4="$(tt split-window -t "$W" -h -P -F '#{pane_id}')"
+TMUX="$(TMUXVAL)" TMUX_PANE="$P4" bash "$HERE/../scripts/agent-status.sh" blocked </dev/null
+case "$(tt show-window-options -v -t "$W" window-status-format 2>/dev/null)" in
+  *'#f38ba8'*) ok "the combined window reads red";; *) bad "no red before the burst";; esac
+run burst "$CLIENT"
+BW="$(tt display-message -t "$P4" -p '#{window_id}')"
+case "$(tt show-window-options -v -t "$BW" window-status-format 2>/dev/null)" in
+  *'#f38ba8'*) ok "the blocked pane's own tab is red";; *) bad "the exploded tab lost its colour";; esac
+check "and the tab it left is no longer red" "" "$(tt show-window-options -v -t "$W" window-status-format 2>/dev/null)"
+run burst-toggle "$CLIENT"
+case "$(tt show-window-options -v -t "$W" window-status-format 2>/dev/null)" in
+  *'#f38ba8'*) ok "collapsing puts the colour back on the one window";; *) bad "colour lost on collapse";; esac
+TMUX="$(TMUXVAL)" TMUX_PANE="$P4" bash "$HERE/../scripts/agent-status.sh" clear </dev/null
+tt kill-pane -t "$P4" 2>/dev/null
+
+echo "== 25. burst: closing the base window does not strand the rest =="
+# Every member carries the record, so any survivor can take the panes home.
+run burst "$CLIENT"
+tt kill-window -t "$W"                     # the base tab, closed while exploded
+run burst-toggle "$CLIENT"                 # fired from a satellite
+SURV="$(tt display-message -c "$CLIENT" -p '#{window_id}')"
+check "a survivor is promoted and takes the panes" 2 "$(tt list-panes -t "$SURV" | wc -l)"
+check "nothing is left marked" 0 "$(tt list-windows -a -F '#{@agent_burst_of}' | grep -c .)"
+tt kill-window -t "$SURV" 2>/dev/null
 
 echo
 echo "----------------------------------------"
