@@ -215,7 +215,9 @@ if [ "$PANE_HL" != "off" ]; then
   esac
   # Arrows on top of the colour: a monochrome phone terminal, or anyone who
   # cannot tell mauve from surface0, still gets to see which pane is live.
-  tmux set-option -g pane-border-indicators both
+  # 3.3+ only -- the option does not exist on the 3.2 floor, where the accent
+  # colour carries the highlight alone.
+  tmux set-option -g pane-border-indicators both 2>/dev/null
 fi
 
 # ------------------------------------------------------------------ pickers --

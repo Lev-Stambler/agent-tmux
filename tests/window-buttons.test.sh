@@ -31,7 +31,9 @@ load_on(){ TMUX="$(tmux -L "$1" display-message -p '#{socket_path},0,0')" \
 load(){ load_on "$SOCK"; }
 occurrences(){ printf '%s' "$2" | grep -o -F "$1" | wc -l | tr -d ' '; }
 # What the client actually gets drawn: the option value expanded as a format.
-expand(){ tt display-message -c "$CLIENT" -p "$1" 2>/dev/null; }
+# Not `display-message -c`: tmux 3.2 rejects that flag, so on the version floor
+# this returned empty and every rendered-format assertion compared "" with "".
+expand(){ tt list-clients -F "#{client_name}	$1" 2>/dev/null | awk -F'\t' -v c="$CLIENT" '$1==c {print $2; exit}'; }
 
 cleanup(){
   exec 9>&- 2>/dev/null
@@ -123,7 +125,13 @@ echo "== 5b. the pane you are in is highlighted =="
 check "active pane border takes the accent" 'fg=#cba6f7' "$(tt show-options -gv pane-active-border-style)"
 check "the other borders go dim"            'fg=#313244' "$(tt show-options -gv pane-border-style)"
 check "borders are drawn heavy"             heavy        "$(tt show-options -gv pane-border-lines)"
-check "and carry the arrow indicators"      both         "$(tt show-options -gv pane-border-indicators)"
+# pane-border-indicators is 3.3+; on the 3.2 floor the accent colour carries
+# the highlight by itself and the option must not be set (nor error).
+if tt show-options -gv pane-border-indicators >/dev/null 2>&1; then
+  check "and carry the arrow indicators" both "$(tt show-options -gv pane-border-indicators)"
+else
+  ok "no arrow indicators on this tmux (3.2 has no such option)"
+fi
 
 echo "== 5c. the explode/collapse key is bound =="
 has "prefix+e runs the toggle" 'burst-toggle' "$(tt list-keys -T prefix e 2>/dev/null)"

@@ -46,6 +46,11 @@ csess(){ tt list-clients -F '#{client_session}' | head -1; }
 # strip style directives and collapse pill padding to single spaces
 # forwards BOTH args: status <current> [width]
 plain(){ run status "$1" ${2:+"$2"} | sed 's/#\[[^]]*\]//g; s/  */ /g; s/^ *//; s/ *$//'; }
+# What CLIENT is looking at, and formats expanded in ITS context. Not
+# `display-message -c`: tmux 3.2 -- the version floor -- rejects that flag
+# outright, so this suite silently compared empty strings there. list-clients
+# expands in the client's own context on every version.
+cfmt(){ tt list-clients -F "#{client_name}	$1" | awk -F'\t' -v c="$CLIENT" '$1==c {print $2; exit}'; }
 
 echo "== 1. status: alphabetical numbering, creation order ignored =="
 check "order+numbers" "+ 1:alpha 2:bravo 3:charlie" "$(plain bravo)"
@@ -245,7 +250,7 @@ run click agent_newwin "$CLIENT"
 check "the + button opened a window in the client's session" "$((W0+1))" "$(tt list-windows -t charlie | wc -l)"
 # The new window must be the one the client is looking at — a window created
 # somewhere behind you is indistinguishable from nothing happening.
-NEWW="$(tt display-message -c "$CLIENT" -p '#{window_id}')"
+NEWW="$(cfmt '#{window_id}')"
 check "and switched the client to it" "$NEWW" "$(tt list-windows -t charlie -F '#{window_id}' | tail -1)"
 
 P0="$(tt list-panes -t "$NEWW" | wc -l)"
@@ -271,7 +276,7 @@ case "$J" in *'explode panes'*) ok "menu offers the explode toggle";; *) bad "no
 # "collapse panes" for a client standing on an exploded window and "explode
 # panes" for one that is not.
 LBL="$(printf '%s\n' "$J" | grep -F 'explode panes' | head -1)"
-check "on an ordinary window it says explode" "explode panes" "$(tt display-message -c "$CLIENT" -p "$LBL")"
+check "on an ordinary window it says explode" "explode panes" "$(cfmt "$LBL")"
 case "$J" in *"burst-toggle '#{client_name}'"*) ok "the explode entry is the toggle";; *) bad "explode entry wrong command";; esac
 # 'e' now belongs to the tail, so it must not also be handed to an attention row
 # -- a duplicate key makes one of the two unreachable from the keyboard.
@@ -289,7 +294,7 @@ check "quotes still balance" 0 "$(( QUOTES % 2 ))"
 
 echo "== 20. burst: every pane of the window becomes its own full-screen window =="
 run jump 4 "$CLIENT"                       # charlie
-W="$(tt display-message -c "$CLIENT" -p '#{window_id}')"
+W="$(cfmt '#{window_id}')"
 tt rename-window -t "$W" burstme
 P1="$(tt display-message -t "$W" -p '#{pane_id}')"
 P2="$(tt split-window -t "$W" -h -P -F '#{pane_id}')"
@@ -312,7 +317,7 @@ check "the base records the layout"  "$LAYOUT" "$(tt show-window-options -v -t "
 # Ids, never indices: renumber-windows shifts indices whenever a window closes.
 case "$(tt show-window-options -v -t "$W" @agent_burst_panes)" in
   *"$P2"*"$P3"*) ok "the base records the pane order";; *) bad "pane order not recorded";; esac
-check "the client follows the pane it was on" "$P2" "$(tt display-message -c "$CLIENT" -p '#{pane_id}')"
+check "the client follows the pane it was on" "$P2" "$(cfmt '#{pane_id}')"
 # rename-window expands its argument as a format and break-pane -n does not --
 # opposite behaviours, both measured. A '#' in the name is where that bites: the
 # base must not be renamed to itself, and the satellite name must not be escaped.
@@ -334,7 +339,7 @@ check "in their original order" "$ORDER" "$(tt list-panes -t "$W" -F '#{pane_id}
 # The whole point. select-layout assigns panes positionally, so this only holds
 # if the join order was rebuilt correctly first.
 check "and the layout is restored byte for byte" "$LAYOUT" "$(tt display-message -t "$W" -p '#{window_layout}')"
-check "the pane you were in is selected" "$P2" "$(tt display-message -c "$CLIENT" -p '#{pane_id}')"
+check "the pane you were in is selected" "$P2" "$(cfmt '#{pane_id}')"
 check "the burst state is cleared" "" "$(tt show-window-options -v -t "$W" @agent_burst_layout 2>/dev/null)"
 check "no satellite marks left behind" 0 "$(tt list-windows -a -F '#{@agent_burst_of}' | grep -c .)"
 
@@ -431,7 +436,7 @@ echo "== 25. burst: closing the base window does not strand the rest =="
 run burst "$CLIENT"
 tt kill-window -t "$W"                     # the base tab, closed while exploded
 run burst-toggle "$CLIENT"                 # fired from a satellite
-SURV="$(tt display-message -c "$CLIENT" -p '#{window_id}')"
+SURV="$(cfmt '#{window_id}')"
 check "a survivor is promoted and takes the panes" 2 "$(tt list-panes -t "$SURV" | wc -l)"
 check "nothing is left marked" 0 "$(tt list-windows -a -F '#{@agent_burst_of}' | grep -c .)"
 tt kill-window -t "$SURV" 2>/dev/null

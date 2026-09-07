@@ -103,8 +103,24 @@ sessions(){ tmux list-sessions -F '#{session_name}' 2>/dev/null; }
 # Empty when there is no such client: the callers then fall back to tmux's own
 # current target rather than doing nothing.
 client_fmt(){ # <client> <format>
-  local c="${1:-}"
-  tmux display-message ${c:+-c "$c"} -p "$2" 2>/dev/null
+  local c="${1:-}" tab
+  [ -n "$c" ] || { tmux display-message -p "$2" 2>/dev/null; return; }
+  # NOT `display-message -c`: tmux 3.2 -- the version floor -- rejects that flag
+  # outright and prints its own usage, which lists it. Measured in a 22.04
+  # container: this helper returned NOTHING there, so every caller silently fell
+  # back to tmux's idea of "current" and `burst` exited before doing anything.
+  # list-clients expands the format in the CLIENT's own context on every version.
+  tab="$(printf '\t')"
+  tmux list-clients -F "#{client_name}${tab}$2" 2>/dev/null \
+    | awk -F"$tab" -v c="$c" '$1==c {print $2; exit}'
+}
+
+# A message on the terminal of whoever pressed the key. Same 3.2 problem: -c is
+# a usage error there, so fall back to an unaddressed message rather than saying
+# nothing at all.
+say(){ # <client> <text>
+  tmux display-message ${1:+-c "$1"} -d 1500 "$2" 2>/dev/null \
+    || tmux display-message -d 1500 "$2" 2>/dev/null
 }
 
 # Recompute one window's agent colour from the panes that are in it NOW.
@@ -233,8 +249,7 @@ case "${1:-}" in
     if [ "$n" -lt 2 ]; then
       # A toggle that silently does nothing is indistinguishable from a key that
       # is not bound. -c puts the message on the terminal of whoever pressed it.
-      tmux display-message ${client:+-c "$client"} -d 1500 \
-        "agent-tmux: one pane — nothing to explode" 2>/dev/null
+      say "$client" "agent-tmux: one pane — nothing to explode"
       exit 0
     fi
     # #{window_layout} ignores zoom, so the saved string is right either way --
@@ -367,8 +382,7 @@ case "${1:-}" in
       [ -n "$(tmux list-panes -t "$m" -F '#{pane_id}' 2>/dev/null)" ] && left=$((left+1))
     done
     if [ "$left" -gt 0 ]; then
-      tmux display-message ${client:+-c "$client"} -d 2000 \
-        "agent-tmux: no room for $left more window(s) — press again after closing a pane" 2>/dev/null
+      say "$client" "agent-tmux: no room for $left more window(s) — press again after closing a pane"
     else
       # The base is in this list too: its @agent_burst_of points at itself.
       for m in $(burst_members "$gid"); do burst_unmark "$m"; paint_win "$m"; done
