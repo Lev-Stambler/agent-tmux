@@ -45,7 +45,7 @@ window full of splits still shows you where you are.
 **Explode a window into full-screen tabs (`prefix` + `e`).** A window holding
 four agents shows *one* blended tab colour, and each agent gets a quarter of the
 screen. Press `prefix` + `e` and every pane becomes its own full-screen window —
-`api`, `api·2`, `api·3` — so each agent gets a whole screen **and its own
+`agents`, `agents·2`, `agents·3` — so each agent gets a whole screen **and its own
 coloured tab**: the tab row turns into a board of every agent's state. Press it
 again, from any of those tabs, and the window comes back with its layout
 restored exactly.
